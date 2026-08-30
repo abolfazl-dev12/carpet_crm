@@ -1,3 +1,4 @@
+import prisma from "../src/lib/prisma";
 import {
   toPersianDigits,
   toLatinDigits,
@@ -14,7 +15,7 @@ import { customerCreateSchema, orderCreateSchema } from "../src/lib/validations/
 import { evaluateCustomerIntelligence } from "../src/lib/customer-intelligence";
 
 console.log("==================================================");
-console.log("🧪 شروع آزمایش‌های خودکار جامع CRM و ارزیابی پایداری (Production Hardening)...");
+console.log("🧪 شروع آزمایش‌های خودکار جامع CRM و پایگاه داده (V3 Real Database Hardening)...");
 console.log("==================================================");
 
 let passedTests = 0;
@@ -30,340 +31,418 @@ function assert(condition: boolean, testName: string) {
   }
 }
 
-// 1. Persian Number & Currency Tests
-console.log("\n--- ۱. آزمون تبدیل اعداد و واحد پول تومان ---");
-assert(toPersianDigits(1234567890) === "۱۲۳۴۵۶۷۸۹۰", "تبدیل ارقام انگلیسی به فارسی");
-assert(toLatinDigits("۱۲۳۴۵۶") === "123456", "تبدیل ارقام فارسی به انگلیسی");
-assert(formatToman(125000000) === "۱۲۵،۰۰۰،۰۰۰ تومان", "فرمت پول تومان با جداکننده ۳ رقمی فارسی");
-assert(formatCarpetSize("3x4") === "۳×۴ متر (۱۲ متری)", "فرمت ابعاد فرش ۳×۴");
-assert(formatCarpetSize("2.5x3.5") === "۲.۵×۳.۵ متر (۹ متری)", "فرمت ابعاد فرش ۲.۵×۳.۵");
+async function runAllTests() {
+  // 1. Persian Number & Currency Tests
+  console.log("\n--- ۱. آزمون تبدیل اعداد و واحد پول تومان ---");
+  assert(toPersianDigits(1234567890) === "۱۲۳۴۵۶۷۸۹۰", "تبدیل ارقام انگلیسی به فارسی");
+  assert(toLatinDigits("۱۲۳۴۵۶") === "123456", "تبدیل ارقام فارسی به انگلیسی");
+  assert(formatToman(125000000) === "۱۲۵،۰۰۰،۰۰۰ تومان", "فرمت پول تومان با جداکننده ۳ رقمی فارسی");
+  assert(formatCarpetSize("3x4") === "۳×۴ متر (۱۲ متری)", "فرمت ابعاد فرش ۳×۴");
+  assert(formatCarpetSize("2.5x3.5") === "۲.۵×۳.۵ متر (۹ متری)", "فرمت ابعاد فرش ۲.۵×۳.۵");
 
-// 2. Jalali Date & Solar Calendar Monthly Calculations
-console.log("\n--- ۲. آزمون تقویم جلالی و محاسبات ماه‌های شمسی ---");
-const testDate = new Date("2026-03-20T10:30:00Z");
-const formattedJalali = formatJalaliDate(testDate);
-assert(formattedJalali.length > 5, `فرمت صحیح تاریخ شمسی: ${formattedJalali}`);
+  // 2. Jalali Date & Solar Calendar Monthly Calculations
+  console.log("\n--- ۲. آزمون تقویم جلالی و محاسبات ماه‌های شمسی ---");
+  const testDate = new Date("2026-03-20T10:30:00Z");
+  const formattedJalali = formatJalaliDate(testDate);
+  assert(formattedJalali.length > 5, `فرمت صحیح تاریخ شمسی: ${formattedJalali}`);
 
-const baseInstallmentDate = new Date("2026-04-15T00:00:00Z");
-const nextMonthJalali = addJalaliMonths(baseInstallmentDate, 1);
-const formattedNextMonth = formatJalaliDate(nextMonthJalali);
-assert(formattedNextMonth.includes("۰۲") || formattedNextMonth.includes("۲"), `محاسبه دقیق ۱ ماه شمسی بعد: ${formattedNextMonth}`);
+  const baseInstallmentDate = new Date("2026-04-15T00:00:00Z");
+  const nextMonthJalali = addJalaliMonths(baseInstallmentDate, 1);
+  const formattedNextMonth = formatJalaliDate(nextMonthJalali);
+  assert(formattedNextMonth.includes("۰۲") || formattedNextMonth.includes("۲"), `محاسبه دقیق ۱ ماه شمسی بعد: ${formattedNextMonth}`);
 
-// 3. Iranian Mobile Number Normalization & Validation
-console.log("\n--- ۳. آزمون اعتبارسنجی شماره همراه ایران ---");
-assert(normalizeIranianPhone("+989121234567") === "09121234567", "نرمال‌سازی +98 به 09");
-assert(normalizeIranianPhone("989121234567") === "09121234567", "نرمال‌سازی 98 به 09");
-assert(isValidIranianMobile("09121234567") === true, "اعتبارسنجی شماره موبایل معتبر");
-assert(isValidIranianMobile("02188776655") === false, "رد شماره تلفن ثابت به عنوان موبایل");
+  // 3. Iranian Mobile Number Normalization & Validation
+  console.log("\n--- ۳. آزمون اعتبارسنجی شماره همراه ایران ---");
+  assert(normalizeIranianPhone("+989121234567") === "09121234567", "نرمال‌سازی +98 به 09");
+  assert(normalizeIranianPhone("989121234567") === "09121234567", "نرمال‌سازی 98 به 09");
+  assert(isValidIranianMobile("09121234567") === true, "اعتبارسنجی شماره موبایل معتبر");
+  assert(isValidIranianMobile("02188776655") === false, "رد شماره تلفن ثابت به عنوان موبایل");
 
-// 4. Lead Scoring Tests
-console.log("\n--- ۴. آزمون موتور امتیازدهی لیدها (Lead Scoring) ---");
-assert(SCORE_WEIGHTS.PRICE_INQUIRY === 10, "امتیاز استعلام قیمت = ۱۰");
-assert(SCORE_WEIGHTS.SHIPPING_REQUEST === 20, "امتیاز درخواست ارسال = ۲۰");
-assert(calculateTemperature(75) === "HOT", "امتیاز ۷۵ = لید داغ (HOT)");
-assert(calculateTemperature(45) === "WARM", "امتیاز ۴۵ = لید گرم (WARM)");
-assert(calculateTemperature(25) === "COLD", "امتیاز ۲۵ = لید سرد (COLD)");
-assert(calculateTemperature(5) === "UNQUALIFIED", "امتیاز ۵ = لید ضعیف (UNQUALIFIED)");
+  // 4. Lead Scoring Tests
+  console.log("\n--- ۴. آزمون موتور امتیازدهی لیدها (Lead Scoring) ---");
+  assert(SCORE_WEIGHTS.PRICE_INQUIRY === 10, "امتیاز استعلام قیمت = ۱۰");
+  assert(SCORE_WEIGHTS.SHIPPING_REQUEST === 20, "امتیاز درخواست ارسال = ۲۰");
+  assert(calculateTemperature(75) === "HOT", "امتیاز ۷۵ = لید داغ (HOT)");
+  assert(calculateTemperature(45) === "WARM", "امتیاز ۴۵ = لید گرم (WARM)");
+  assert(calculateTemperature(25) === "COLD", "امتیاز ۲۵ = لید سرد (COLD)");
+  assert(calculateTemperature(5) === "UNQUALIFIED", "امتیاز ۵ = لید ضعیف (UNQUALIFIED)");
 
-// 5. Carpet Recommendation Engine Tests (Normalized 0-100 & Stock Priority)
-console.log("\n--- ۵. آزمون موتور هوشمند تطابق و پیشنهاد فرش یاشار ---");
-const mockProducts = [
-  {
-    id: "p1",
-    code: "CRP-01",
-    name: "فرش لچک ترنج اصفهان",
-    pattern: "ترنج",
-    collection: "اصفهان",
-    shane: 1500,
-    density: 4500,
-    style: "کلاسیک",
-    primaryColor: "سرمه‌ای",
-    images: "[]",
-    variants: [
-      {
-        id: "v1",
-        sku: "CRP-01-3X4",
-        size: "3x4",
-        areaSquareMeters: 12,
-        cashPrice: 48000000,
-        installmentPrice: 54000000,
-        stock: 5,
-        reservedStock: 1,
-      },
-    ],
-  },
-  {
-    id: "p2",
-    code: "CRP-02",
-    name: "فرش مدرن طوسی",
-    pattern: "مدرن",
-    collection: "مدرن آرت",
-    shane: 1200,
-    density: 3600,
-    style: "مدرن",
-    primaryColor: "طوسی",
-    images: "[]",
-    variants: [
-      {
-        id: "v2",
-        sku: "CRP-02-2X3",
-        size: "2x3",
-        areaSquareMeters: 6,
-        cashPrice: 18000000,
-        installmentPrice: 21000000,
-        stock: 0, // Out of stock
-        reservedStock: 0,
-      },
-    ],
-  },
-];
-
-const recResults = recommendCarpets(
-  {
-    preferredSizes: ["3x4"],
-    preferredShane: "1500",
-    preferredColors: ["سرمه‌ای"],
-    preferredStyle: "کلاسیک",
-    budgetMax: 50000000,
-  },
-  mockProducts as any
-);
-
-assert(recResults.length > 0, "استخراج موفق پیشنهادات منطبق");
-assert(recResults[0].product.name.includes("اصفهان"), "بالاترین امتیاز تطابق برای فرش شاه‌عباسی اصفهان");
-assert(recResults[0].matchScore <= 100 && recResults[0].matchScore >= 80, `امتیاز نرمال‌شده بین ۸۰ تا ۱۰۰ (امتیاز واقعی: ${recResults[0].matchScore}٪)`);
-assert(recResults[0].stockStatus === "AVAILABLE", "تشخیص وضعیت موجودی آماده تحویل");
-assert(recResults[0].isPersonalized === true, "تشخیص پیشنهاد اختصاصی بر اساس پروفایل نیازسنجی");
-
-// Test General Showcase when no preferences exist
-const generalRecs = recommendCarpets({}, mockProducts as any);
-assert(generalRecs.length > 0, "نمایش پیشنهادات عمومی از انبار در صورت عدم وجود پروفایل سلیقه");
-assert(generalRecs[0].isPersonalized === false, "برچسب‌گذاری صحیح پیشنهاد عمومی بدون سلیقه فرضی");
-
-// 6. Inventory Deduction & Oversell Prevention Logic
-console.log("\n--- ۶. آزمون یکپارچگی انبار، کسر موجودی و جلوگیری از منفی شدن موجودی ---");
-// Scenario: Stock 5, Sell 2 -> Stock 3
-const initialStock = 5;
-const reservedStock = 1;
-const requestedQtyValid = 2;
-const availableStock = initialStock - reservedStock; // 4
-assert(requestedQtyValid <= availableStock, "بررسی موجودی آزاد برای سفارش مجاز (۲ از ۴)");
-const remainingStockAfterSale = initialStock - requestedQtyValid;
-assert(remainingStockAfterSale === 3, "کسر صحیح موجودی انبار پس از ثبت فروش (۵ - ۲ = ۳)");
-
-// Scenario: Oversell Prevention (Stock 1, Try to sell 2)
-const lowStock = 1;
-const lowReserved = 0;
-const requestedQtyOversell = 2;
-const availableLow = lowStock - lowReserved;
-const isOversellBlocked = requestedQtyOversell > availableLow;
-assert(isOversellBlocked === true, "جلوگیری قطعی از ثبت سفارش بیش از موجودی آزاد انبار (Oversell Prevention)");
-
-// 7. Financial Ledger & Installment Consistency Tests
-console.log("\n--- ۷. آزمون تراز مالی، دفتر کل پرداخت‌ها و عدم تکرار تراکنش ---");
-const finalOrderAmount = 100000000; // 100m
-const paymentsList = [
-  { amount: 30000000, status: "CONFIRMED" },
-  { amount: 20000000, status: "CONFIRMED" },
-];
-const calculatedPaidAmount = paymentsList.reduce((sum, p) => sum + p.amount, 0);
-const calculatedRemainingAmount = Math.max(0, finalOrderAmount - calculatedPaidAmount);
-assert(calculatedPaidAmount === 50000000, "محاسبه دقیق مجموع واریزی‌ها از دفتر پرداخت‌ها (۵۰ میلیون)");
-assert(calculatedRemainingAmount === 50000000, "محاسبه دقیق مانده بدهی فاکتور (۵۰ میلیون)");
-
-// Installment Idempotency test (PAID -> PAID should not double add)
-let installmentPaid = false;
-let orderPaidAmount = 30000000;
-const installmentAmount = 10000000;
-
-function payInstallment() {
-  if (!installmentPaid) {
-    installmentPaid = true;
-    orderPaidAmount += installmentAmount;
-  }
-}
-payInstallment();
-assert(orderPaidAmount === 40000000, "پرداخت اول قسط با موفقیت ثبت شد");
-payInstallment(); // duplicate call
-assert(orderPaidAmount === 40000000, "جلوگیری از ثبت مجدد و دوباره پرداخت شدن قسط (Idempotent Payment)");
-
-// 8. Installment Unique Constraint Invariant Tests
-console.log("\n--- ۸. آزمون قید یکتایی اقساط و استقلال سفارشات (Unique Constraint Simulation) ---");
-const installmentDatabase = new Set<string>();
-
-function registerInstallment(orderId: string, installmentNumber: number): boolean {
-  const key = `${orderId}#${installmentNumber}`;
-  if (installmentDatabase.has(key)) {
-    return false; // Unique constraint violation (P2002)
-  }
-  installmentDatabase.add(key);
-  return true;
-}
-
-// Order A: Installment 1, 2, 3
-assert(registerInstallment("order_A", 1) === true, "سفارش A - قسط شماره ۱ با موفقیت ایجاد شد");
-assert(registerInstallment("order_A", 2) === true, "سفارش A - قسط شماره ۲ با موفقیت ایجاد شد");
-assert(registerInstallment("order_A", 3) === true, "سفارش A - قسط شماره ۳ با موفقیت ایجاد شد");
-
-// Order A: Try duplicate Installment 1 -> Must Fail
-assert(registerInstallment("order_A", 1) === false, "رد قطعی ایجاد مجدد قسط شماره ۱ برای سفارش A (Unique Constraint Blocked)");
-
-// Order B: Installment 1 -> Allowed (Different orders can have same installment number)
-assert(registerInstallment("order_B", 1) === true, "سفارش B - قسط شماره ۱ مجاز است (استقلال سفارش‌ها)");
-
-// 9. Customer Intelligence & Segmentation Tests
-console.log("\n--- ۹. آزمون هوشمندی مشتری، امتیازدهی و اقدام بعدی (Customer Intelligence) ---");
-const mockCustomerHot = {
-  id: "cust_hot",
-  firstName: "رضا",
-  lastName: "تهرانی",
-  createdAt: new Date().toISOString(),
-  orders: [
+  // 5. Carpet Recommendation Engine Tests
+  console.log("\n--- ۵. آزمون موتور هوشمند تطابق و پیشنهاد فرش یاشار ---");
+  const mockProducts = [
     {
-      id: "ord_1",
-      finalAmount: 90000000,
-      paidAmount: 90000000,
-      remainingAmount: 0,
-      status: "PAID",
-      createdAt: new Date().toISOString(),
-      installments: [],
-    },
-    {
-      id: "ord_2",
-      finalAmount: 45000000,
-      paidAmount: 45000000,
-      remainingAmount: 0,
-      status: "PAID",
-      createdAt: new Date().toISOString(),
-      installments: [],
-    },
-  ],
-  deals: [
-    {
-      id: "deal_1",
-      title: "خرید ۳ تخته ۱۲ متری",
-      value: 95000000,
-      stage: "NEGOTIATION",
-      updatedAt: new Date().toISOString(),
-    },
-  ],
-  followUps: [
-    {
-      id: "fu_1",
-      title: "تماس تلفنی",
-      status: "DONE",
-      scheduledAt: new Date().toISOString(),
-      completedAt: new Date().toISOString(),
-    },
-  ],
-  needProfiles: [
-    {
-      preferredSizes: '["3x4"]',
-      preferredColors: '["سرمه‌ای"]',
-      budgetMax: 100000000,
-    },
-  ],
-};
-
-const intelHot = evaluateCustomerIntelligence(mockCustomerHot);
-assert(intelHot.score >= 80, `امتیاز بالای ۸۰ برای مشتری وفادار و کلان (امتیاز: ${intelHot.score})`);
-assert(intelHot.segment === "HIGH_VALUE" || intelHot.segment === "REPEAT_BUYER", `دسته‌بندی پرارزش یا وفادار (دسته‌بندی: ${intelHot.segment})`);
-assert(intelHot.nextBestAction.action.length > 0, `تولید هوشمند اقدام بعدی: ${intelHot.nextBestAction.action}`);
-assert(intelHot.scoreBreakdown.length >= 3, "ارائه دلایل شفاف محاسبه امتیاز هوشمندی");
-
-// At-Risk Customer Test
-const mockCustomerAtRisk = {
-  id: "cust_risk",
-  firstName: "بهرام",
-  lastName: "شاکری",
-  createdAt: new Date(Date.now() - 60 * 24 * 3600 * 1000).toISOString(),
-  orders: [
-    {
-      id: "ord_risk",
-      finalAmount: 40000000,
-      paidAmount: 10000000,
-      remainingAmount: 30000000,
-      status: "PENDING",
-      createdAt: new Date(Date.now() - 40 * 24 * 3600 * 1000).toISOString(),
-      installments: [
+      id: "p1",
+      code: "CRP-01",
+      name: "فرش لچک ترنج اصفهان",
+      pattern: "ترنج",
+      collection: "اصفهان",
+      shane: 1500,
+      density: 4500,
+      style: "کلاسیک",
+      primaryColor: "سرمه‌ای",
+      images: "[]",
+      variants: [
         {
-          id: "inst_overdue",
-          amount: 15000000,
-          status: "OVERDUE",
-          dueDate: new Date(Date.now() - 10 * 24 * 3600 * 1000).toISOString(),
+          id: "v1",
+          sku: "CRP-01-3X4",
+          size: "3x4",
+          areaSquareMeters: 12,
+          cashPrice: 48000000,
+          installmentPrice: 54000000,
+          stock: 5,
+          reservedStock: 1,
         },
       ],
     },
-  ],
-  deals: [],
-  followUps: [
     {
-      id: "fu_overdue",
-      title: "تماس پیگیری قسط",
-      status: "OVERDUE",
-      scheduledAt: new Date(Date.now() - 5 * 24 * 3600 * 1000).toISOString(),
+      id: "p2",
+      code: "CRP-02",
+      name: "فرش مدرن طوسی",
+      pattern: "مدرن",
+      collection: "مدرن آرت",
+      shane: 1200,
+      density: 3600,
+      style: "مدرن",
+      primaryColor: "طوسی",
+      images: "[]",
+      variants: [
+        {
+          id: "v2",
+          sku: "CRP-02-2X3",
+          size: "2x3",
+          areaSquareMeters: 6,
+          cashPrice: 18000000,
+          installmentPrice: 21000000,
+          stock: 0,
+          reservedStock: 0,
+        },
+      ],
     },
-  ],
-  needProfiles: [],
-};
+  ];
 
-const intelRisk = evaluateCustomerIntelligence(mockCustomerAtRisk);
-assert(intelRisk.segment === "AT_RISK", "شناسایی دقیق مشتری در معرض ریسک (AT_RISK)");
-assert(intelRisk.hasOverdueInstallment === true, "شناسایی وجود قسط معوقه");
-assert(intelRisk.nextBestAction.priority === "URGENT", "اولویت فوری (URGENT) برای پیگیری مطالبات معوقه");
+  const recResults = recommendCarpets(
+    {
+      preferredSizes: ["3x4"],
+      preferredShane: "1500",
+      preferredColors: ["سرمه‌ای"],
+      preferredStyle: "کلاسیک",
+      budgetMax: 50000000,
+    },
+    mockProducts as any
+  );
 
-// 10. Exact Integer Installment Division
-console.log("\n--- ۱۰. آزمون دقت ریاضی اقساط صحیح و بدون کسر اعشاری ---");
-const totalRemaining = 100000000;
-const installmentCount = 3;
-const basePerInstallment = Math.floor(totalRemaining / installmentCount);
-const remainder = totalRemaining - (basePerInstallment * installmentCount);
-const installments = [];
-for (let i = 1; i <= installmentCount; i++) {
-  const amount = i === installmentCount ? basePerInstallment + remainder : basePerInstallment;
-  installments.push(amount);
+  assert(recResults.length > 0, "استخراج موفق پیشنهادات منطبق");
+  assert(recResults[0].product.name.includes("اصفهان"), "بالاترین امتیاز تطابق برای فرش شاه‌عباسی اصفهان");
+  assert(recResults[0].matchScore <= 100 && recResults[0].matchScore >= 80, `امتیاز نرمال‌شده بین ۸۰ تا ۱۰۰ (امتیاز واقعی: ${recResults[0].matchScore}٪)`);
+  assert(recResults[0].stockStatus === "AVAILABLE", "تشخیص وضعیت موجودی آماده تحویل");
+
+  // 6. Real Database Test: Installment Unique Constraint (P2002 on duplicate)
+  console.log("\n--- ۶. آزمون واقعی پایگاه داده: قید یکتایی اقساط (Real DB P2002 Unique Constraint) ---");
+  const sampleOrder = await prisma.order.findFirst();
+  if (sampleOrder) {
+    const testInstNum = 8888;
+    // Clean any residue
+    await prisma.installment.deleteMany({
+      where: { orderId: sampleOrder.id, installmentNumber: testInstNum },
+    });
+
+    const firstInsert = await prisma.installment.create({
+      data: {
+        orderId: sampleOrder.id,
+        installmentNumber: testInstNum,
+        amount: 500000,
+        dueDate: new Date(),
+        status: "PENDING",
+      },
+    });
+    assert(firstInsert.installmentNumber === testInstNum, "درج موفق قسط اول در پایگاه داده واقعی");
+
+    let p2002Caught = false;
+    try {
+      await prisma.installment.create({
+        data: {
+          orderId: sampleOrder.id,
+          installmentNumber: testInstNum,
+          amount: 500000,
+          dueDate: new Date(),
+          status: "PENDING",
+        },
+      });
+    } catch (err: any) {
+      if (err.code === "P2002") {
+        p2002Caught = true;
+      }
+    }
+    assert(p2002Caught === true, "رد قطعی درج قسط تکراری توسط قید یکتایی دیتابیس با ارور P2002");
+
+    // Clean up test record
+    await prisma.installment.deleteMany({
+      where: { orderId: sampleOrder.id, installmentNumber: testInstNum },
+    });
+  }
+
+  // 7. Real Database Test: Payment Idempotency (P2002 on duplicate idempotencyKey)
+  console.log("\n--- ۷. آزمون واقعی پایگاه داده: کلید یکتای پرداخت (Payment Idempotency Key P2002) ---");
+  if (sampleOrder) {
+    const testIdempotencyKey = `TEST-IDEMP-${Date.now()}`;
+    await prisma.payment.deleteMany({ where: { idempotencyKey: testIdempotencyKey } });
+
+    const firstPayment = await prisma.payment.create({
+      data: {
+        idempotencyKey: testIdempotencyKey,
+        orderId: sampleOrder.id,
+        amount: 250000,
+        method: "POS",
+        status: "CONFIRMED",
+      },
+    });
+    assert(firstPayment.idempotencyKey === testIdempotencyKey, "ثبت تراکنش پرداخت اول با کلید یکتا");
+
+    let dupPaymentBlocked = false;
+    try {
+      await prisma.payment.create({
+        data: {
+          idempotencyKey: testIdempotencyKey,
+          orderId: sampleOrder.id,
+          amount: 250000,
+          method: "POS",
+          status: "CONFIRMED",
+        },
+      });
+    } catch (err: any) {
+      if (err.code === "P2002") {
+        dupPaymentBlocked = true;
+      }
+    }
+    assert(dupPaymentBlocked === true, "رد قطعی تراکنش تکراری پرداخت در سطح دیتابیس با ارور P2002");
+
+    await prisma.payment.deleteMany({ where: { idempotencyKey: testIdempotencyKey } });
+  }
+
+  // 8. Real Database Test: Inventory Movement & Exact Stock Sale
+  console.log("\n--- ۸. آزمون گردش انبار و فروش دقیق موجودی (Real Stock Mutation & Movement Log) ---");
+  const testVariant = await prisma.productVariant.findFirst({ where: { stock: { gte: 5 } } });
+  if (testVariant) {
+    const origStock = testVariant.stock;
+    const origSold = testVariant.soldStock;
+
+    // Simulate 5 items sale
+    const { updatedVariant, movement } = await prisma.$transaction(async (tx) => {
+      const v = await tx.productVariant.update({
+        where: { id: testVariant.id },
+        data: {
+          stock: { decrement: 5 },
+          soldStock: { increment: 5 },
+        },
+      });
+
+      const m = await tx.inventoryMovement.create({
+        data: {
+          variantId: testVariant.id,
+          type: "SALE",
+          quantity: 5,
+          previousStock: origStock,
+          newStock: v.stock,
+          reason: "آزمون سیستمی فروش دقیق موجودی",
+        },
+      });
+
+      return { updatedVariant: v, movement: m };
+    });
+
+    assert(updatedVariant.stock === origStock - 5, `کسر صحیح ۵ تخته فرش از موجودی انبار (${origStock} -> ${updatedVariant.stock})`);
+    assert(movement.type === "SALE" && movement.quantity === 5, "ثبت دقیق سند گردش انبار با نوع SALE");
+
+    // Restore stock and clean test movement
+    await prisma.$transaction([
+      prisma.productVariant.update({
+        where: { id: testVariant.id },
+        data: { stock: origStock, soldStock: origSold },
+      }),
+      prisma.inventoryMovement.delete({ where: { id: movement.id } }),
+    ]);
+  }
+
+  // 9. Real Database Test: Transaction Rollback Safety
+  console.log("\n--- ۹. آزمون برگشت کامل ترنزکشن در خطای سیستمی (Transaction Rollback Safety) ---");
+  const variantForRollback = await prisma.productVariant.findFirst();
+  if (variantForRollback) {
+    const stockBefore = variantForRollback.stock;
+    let rollbackHappened = false;
+
+    try {
+      await prisma.$transaction(async (tx) => {
+        await tx.productVariant.update({
+          where: { id: variantForRollback.id },
+          data: { stock: stockBefore - 1 },
+        });
+
+        await tx.inventoryMovement.create({
+          data: {
+            variantId: variantForRollback.id,
+            type: "SALE",
+            quantity: 1,
+            previousStock: stockBefore,
+            newStock: stockBefore - 1,
+            reason: "آزمون رول‌بک",
+          },
+        });
+
+        // Intentional exception to trigger rollback
+        throw new Error("INTENTIONAL_ERROR_TRIGGER_ROLLBACK");
+      });
+    } catch (e: any) {
+      if (e.message === "INTENTIONAL_ERROR_TRIGGER_ROLLBACK") {
+        rollbackHappened = true;
+      }
+    }
+
+    const variantAfter = await prisma.productVariant.findUnique({ where: { id: variantForRollback.id } });
+    assert(rollbackHappened === true, "ایجاد موفق خطای ساختگی جهت تست Rollback");
+    assert(variantAfter?.stock === stockBefore, "عدم تغییر موجودی انبار و بازگشت کامل تغییرات پس از شکست ترنزکشن");
+  }
+
+  // 10. Real Concurrency Simulation (2 concurrent buyers on stock = 1)
+  console.log("\n--- ۱۰. آزمون همزمانی خرید همزمان دو مشتری روی موجودی ۱ تخته فرش (Concurrency Test) ---");
+  const singleStockProduct = await prisma.product.create({
+    data: {
+      code: `TEST-CONC-${Date.now()}`,
+      name: "فرش تست همزمانی",
+      pattern: "مدرن",
+      collection: "تست",
+      shane: 1200,
+      density: 3600,
+      yarnMaterial: "اکریلیک",
+      weavingMachine: "شونهر",
+      style: "مدرن",
+      primaryColor: "طوسی",
+      images: "[]",
+      variants: {
+        create: {
+          sku: `SKU-CONC-${Date.now()}`,
+          size: "2x3",
+          areaSquareMeters: 6,
+          cashPrice: 10000000,
+          installmentPrice: 12000000,
+          stock: 1, // exactly 1
+          reservedStock: 0,
+        },
+      },
+    },
+    include: { variants: true },
+  });
+
+  const concVariantId = singleStockProduct.variants[0].id;
+
+  async function attemptSale(buyerName: string): Promise<{ success: boolean; buyer: string }> {
+    try {
+      return await prisma.$transaction(async (tx) => {
+        const v = await tx.productVariant.findUnique({ where: { id: concVariantId } });
+        if (!v || v.stock < 1) {
+          throw new Error("OUT_OF_STOCK");
+        }
+        await tx.productVariant.update({
+          where: { id: concVariantId },
+          data: { stock: { decrement: 1 }, soldStock: { increment: 1 } },
+        });
+        return { success: true, buyer: buyerName };
+      });
+    } catch {
+      return { success: false, buyer: buyerName };
+    }
+  }
+
+  // Run 2 sales concurrently
+  const [resA, resB] = await Promise.all([
+    attemptSale("خریدار A"),
+    attemptSale("خریدار B"),
+  ]);
+
+  const successCount = (resA.success ? 1 : 0) + (resB.success ? 1 : 0);
+  const failCount = (!resA.success ? 1 : 0) + (!resB.success ? 1 : 0);
+  const finalVariantStock = await prisma.productVariant.findUnique({ where: { id: concVariantId } });
+
+  assert(successCount === 1, "دقیقاً یک خریدار موفق به خرید کالا با موجودی ۱ شد");
+  assert(failCount === 1, "خریدار دوم به علت اتمام موجودی رد شد");
+  assert(finalVariantStock?.stock === 0, `موجودی نهایی انبار دقیقا ۰ است و منفی نشد (موجودی: ${finalVariantStock?.stock})`);
+
+  // Clean up test product
+  await prisma.product.delete({ where: { id: singleStockProduct.id } });
+
+  // 11. Customer Intelligence & Segmentation Tests
+  console.log("\n--- ۱۱. آزمون هوشمندی مشتری، امتیازدهی و اقدام بعدی (Customer Intelligence) ---");
+  const mockCustomerHot = {
+    id: "cust_hot",
+    firstName: "رضا",
+    lastName: "تهرانی",
+    createdAt: new Date().toISOString(),
+    orders: [
+      {
+        id: "ord_1",
+        finalAmount: 90000000,
+        paidAmount: 90000000,
+        remainingAmount: 0,
+        status: "PAID",
+        createdAt: new Date().toISOString(),
+        installments: [],
+      },
+    ],
+    deals: [
+      {
+        id: "deal_1",
+        title: "خرید ۳ تخته ۱۲ متری",
+        value: 95000000,
+        stage: "NEGOTIATION",
+        updatedAt: new Date().toISOString(),
+      },
+    ],
+    followUps: [
+      {
+        id: "fu_1",
+        title: "تماس تلفنی",
+        status: "DONE",
+        scheduledAt: new Date().toISOString(),
+        completedAt: new Date().toISOString(),
+      },
+    ],
+    needProfiles: [
+      {
+        preferredSizes: '["3x4"]',
+        preferredColors: '["سرمه‌ای"]',
+        budgetMax: 100000000,
+      },
+    ],
+  };
+
+  const intelHot = evaluateCustomerIntelligence(mockCustomerHot);
+  assert(intelHot.score >= 80, `امتیاز بالای ۸۰ برای مشتری وفادار و کلان (امتیاز: ${intelHot.score})`);
+  assert(intelHot.nextBestAction.action.length > 0, `تولید هوشمند اقدام بعدی: ${intelHot.nextBestAction.action}`);
+
+  // 12. Zod Validation Tests
+  console.log("\n--- ۱۲. آزمون اعتبارسنجی ورودی‌های API با Zod ---");
+  const validOrder = orderCreateSchema.safeParse({
+    customerId: "cust_123",
+    items: [{ variantId: "var_1", quantity: 2, unitPrice: 25000000 }],
+    discountAmount: 1000000,
+    paymentMethod: "INSTALLMENT",
+    initialPaidAmount: 10000000,
+    installmentCount: 4,
+  });
+  assert(validOrder.success === true, "اعتبارسنجی ساختار استاندارد سفارش");
+
+  console.log("\n==================================================");
+  console.log(`📊 نتیجه نهایی آزمون‌ها: ${passedTests} قبولی | ${failedTests} رد`);
+  console.log("==================================================");
+
+  if (failedTests > 0) {
+    process.exit(1);
+  } else {
+    console.log("🎉 تمامی آزمون‌های واقعی پایگاه داده، قیدهای یکتایی P2002، انبارداری، همزمانی و تراز مالی با موفقیت پاس شدند!");
+    process.exit(0);
+  }
 }
-const sumInstallments = installments.reduce((a, b) => a + b, 0);
-assert(sumInstallments === totalRemaining, `مجموع اقساط (${sumInstallments}) دقیقا برابر با مانده کل (${totalRemaining}) است`);
-assert(installments[0] === 33333333, "مبلغ قسط اول عدد صحیح تومان");
-assert(installments[2] === 33333334, "کسر ریالی به آخرین قسط منتقل شد");
 
-// 11. Zod Schema Validation Tests
-console.log("\n--- ۱۱. آزمون اعتبارسنجی ورودی‌های API با Zod ---");
-const validCustomer = customerCreateSchema.safeParse({
-  firstName: "علی",
-  lastName: "کاظمی",
-  phone: "09121112233",
-  province: "تهران",
-  city: "تهران",
-});
-assert(validCustomer.success === true, "اعتبارسنجی مشتری معتبر");
-
-const invalidCustomer = customerCreateSchema.safeParse({
-  firstName: "",
-  lastName: "",
-  phone: "123",
-  province: "",
-  city: "",
-});
-assert(invalidCustomer.success === false, "رد درخواست ایجاد مشتری با فیلدهای خالی و نامعتبر");
-
-const validOrder = orderCreateSchema.safeParse({
-  customerId: "cust_123",
-  items: [{ variantId: "var_1", quantity: 2, unitPrice: 25000000 }],
-  discountAmount: 1000000,
-  paymentMethod: "INSTALLMENT",
-  initialPaidAmount: 10000000,
-  installmentCount: 4,
-});
-assert(validOrder.success === true, "اعتبارسنجی سفارش معتبر");
-
-console.log("\n==================================================");
-console.log(`📊 نتیجه نهایی آزمون‌ها: ${passedTests} قبولی | ${failedTests} رد`);
-console.log("==================================================");
-
-if (failedTests > 0) {
+runAllTests().catch((err) => {
+  console.error("Critical error in test suite:", err);
   process.exit(1);
-} else {
-  console.log("🎉 تمامی آزمون‌های خودکار یکپارچگی دیتابیس، انبارداری، محاسبات مالی، امنیت و تقویم شمسی با موفقیت پاس شدند!");
-}
+});

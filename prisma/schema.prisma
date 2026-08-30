@@ -430,6 +430,7 @@ model OrderItem {
 
 model Payment {
   id             String        @id @default(cuid())
+  idempotencyKey String?       @unique
   orderId        String
   order          Order         @relation(fields: [orderId], references: [id], onDelete: Cascade)
   amount         Int

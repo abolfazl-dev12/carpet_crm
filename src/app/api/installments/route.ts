@@ -68,24 +68,25 @@ export async function PUT(req: NextRequest) {
       return NextResponse.json({ error: "عدم دسترسی برای ویرایش این قسط" }, { status: 403 });
     }
 
-    const trackingTag = `INST-${installment.orderId}-${installment.installmentNumber}`;
+    const idempotencyTag = `INST-${installment.orderId}-${installment.installmentNumber}`;
 
     // Atomic transaction for updating installment, order balances, and ledger payments
     const updated = await prisma.$transaction(async (tx) => {
       // 1. Transition: Non-PAID -> PAID
       if (status === "PAID" && installment.status !== "PAID") {
-        // Prevent duplicate payment record if already recorded
-        const existingPayment = await tx.payment.findFirst({
-          where: { orderId: installment.orderId, trackingNumber: trackingTag },
+        // Prevent duplicate payment record via database idempotencyKey constraint
+        const existingPayment = await tx.payment.findUnique({
+          where: { idempotencyKey: idempotencyTag },
         });
 
         if (!existingPayment) {
           await tx.payment.create({
             data: {
+              idempotencyKey: idempotencyTag,
               orderId: installment.orderId,
               amount: Math.round(installment.amount),
               method: "CHEQUE",
-              trackingNumber: trackingTag,
+              trackingNumber: paymentTracking || chequeNumber || idempotencyTag,
               status: "CONFIRMED",
               notes: `وصول قسط شماره ${installment.installmentNumber} (چک: ${chequeNumber || "-"})`,
             },
@@ -96,7 +97,7 @@ export async function PUT(req: NextRequest) {
       // 2. Transition: PAID -> Non-PAID (Reversal / Correction)
       if (status !== "PAID" && installment.status === "PAID") {
         await tx.payment.deleteMany({
-          where: { orderId: installment.orderId, trackingNumber: trackingTag },
+          where: { idempotencyKey: idempotencyTag },
         });
       }
 

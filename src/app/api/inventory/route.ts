@@ -60,6 +60,32 @@ export async function POST(req: NextRequest) {
     if (!variant) return NextResponse.json({ error: "کالای انبار یافت نشد." }, { status: 404 });
 
     const qty = Math.max(1, Math.round(quantity));
+    const availableStock = variant.stock - (variant.reservedStock || 0);
+
+    // Strict validation guards - prevent negative stock or invalid mutations
+    if (type === "SALE") {
+      if (qty > availableStock) {
+        return NextResponse.json(
+          { error: "موجودی کافی برای ثبت این عملیات وجود ندارد." },
+          { status: 400 }
+        );
+      }
+    } else if (type === "RESERVATION") {
+      if (qty > availableStock) {
+        return NextResponse.json(
+          { error: "موجودی آزاد کافی برای رزرو این کالا وجود ندارد." },
+          { status: 400 }
+        );
+      }
+    } else if (type === "RELEASE_RESERVATION") {
+      if (qty > variant.reservedStock) {
+        return NextResponse.json(
+          { error: "تعداد آزادسازی بیشتر از موجودی رزرو شده است." },
+          { status: 400 }
+        );
+      }
+    }
+
     let newStock = variant.stock;
     let newReserved = variant.reservedStock;
     let newSold = variant.soldStock;
@@ -67,13 +93,12 @@ export async function POST(req: NextRequest) {
     if (type === "PURCHASE" || type === "RETURN") {
       newStock += qty;
     } else if (type === "SALE") {
-      newStock = Math.max(0, newStock - qty);
+      newStock -= qty;
       newSold += qty;
-      if (newReserved > 0) newReserved = Math.max(0, newReserved - qty);
     } else if (type === "RESERVATION") {
       newReserved += qty;
     } else if (type === "RELEASE_RESERVATION") {
-      newReserved = Math.max(0, newReserved - qty);
+      newReserved -= qty;
     } else if (type === "ADJUSTMENT") {
       newStock = qty;
     }
@@ -88,6 +113,10 @@ export async function POST(req: NextRequest) {
           soldStock: newSold,
         },
       });
+
+      if (updated.stock < 0 || updated.reservedStock < 0) {
+        throw new Error("خطای محاسباتی انبار: موجودی منفی غیرمجاز است.");
+      }
 
       const mov = await tx.inventoryMovement.create({
         data: {
@@ -115,6 +144,9 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ success: true, variant: updatedVariant, movement });
   } catch (error: any) {
     console.error("Error in inventory movement:", error);
-    return NextResponse.json({ error: "خطا در ثبت گردش انبار" }, { status: 500 });
+    return NextResponse.json(
+      { error: error?.message?.includes("منفی") ? error.message : "خطا در ثبت گردش انبار" },
+      { status: 500 }
+    );
   }
 }

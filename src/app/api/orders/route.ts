@@ -188,10 +188,11 @@ export async function POST(req: NextRequest) {
         });
       }
 
-      // 5. Record initial payment if provided
+      // 5. Record initial payment if provided (with unique idempotencyKey)
       if (paidAmount > 0) {
         await tx.payment.create({
           data: {
+            idempotencyKey: `ORDER-INIT-${createdOrder.id}`,
             orderId: createdOrder.id,
             amount: paidAmount,
             method: paymentMethod === "INSTALLMENT" ? "POS" : paymentMethod,
