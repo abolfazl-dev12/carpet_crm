@@ -183,6 +183,8 @@ model Customer {
 
   @@index([phone])
   @@index([province, city])
+  @@index([assignedToId])
+  @@index([createdAt])
 }
 
 model Lead {
@@ -219,6 +221,8 @@ model Lead {
   @@index([status])
   @@index([temperature])
   @@index([source])
+  @@index([assignedToId])
+  @@index([createdAt])
 }
 
 model CarpetNeedProfile {
@@ -312,6 +316,8 @@ model InventoryMovement {
 
   @@index([variantId])
   @@index([type])
+  @@index([createdAt])
+  @@index([userId])
 }
 
 model Deal {
@@ -406,6 +412,8 @@ model Order {
   @@index([orderNumber])
   @@index([customerId])
   @@index([status])
+  @@index([sellerId])
+  @@index([createdAt])
 }
 
 model OrderItem {
@@ -433,6 +441,7 @@ model Payment {
   createdAt      DateTime      @default(now())
 
   @@index([orderId])
+  @@index([paidAt])
 }
 
 model Installment {
@@ -450,6 +459,7 @@ model Installment {
   createdAt         DateTime          @default(now())
   updatedAt         DateTime          @updatedAt
 
+  @@unique([orderId, installmentNumber])
   @@index([orderId])
   @@index([dueDate, status])
 }

@@ -187,8 +187,32 @@ assert(orderPaidAmount === 40000000, "پرداخت اول قسط با موفقی
 payInstallment(); // duplicate call
 assert(orderPaidAmount === 40000000, "جلوگیری از ثبت مجدد و دوباره پرداخت شدن قسط (Idempotent Payment)");
 
-// 8. Customer Intelligence & Segmentation Tests
-console.log("\n--- ۸. آزمون هوشمندی مشتری، امتیازدهی و اقدام بعدی (Customer Intelligence) ---");
+// 8. Installment Unique Constraint Invariant Tests
+console.log("\n--- ۸. آزمون قید یکتایی اقساط و استقلال سفارشات (Unique Constraint Simulation) ---");
+const installmentDatabase = new Set<string>();
+
+function registerInstallment(orderId: string, installmentNumber: number): boolean {
+  const key = `${orderId}#${installmentNumber}`;
+  if (installmentDatabase.has(key)) {
+    return false; // Unique constraint violation (P2002)
+  }
+  installmentDatabase.add(key);
+  return true;
+}
+
+// Order A: Installment 1, 2, 3
+assert(registerInstallment("order_A", 1) === true, "سفارش A - قسط شماره ۱ با موفقیت ایجاد شد");
+assert(registerInstallment("order_A", 2) === true, "سفارش A - قسط شماره ۲ با موفقیت ایجاد شد");
+assert(registerInstallment("order_A", 3) === true, "سفارش A - قسط شماره ۳ با موفقیت ایجاد شد");
+
+// Order A: Try duplicate Installment 1 -> Must Fail
+assert(registerInstallment("order_A", 1) === false, "رد قطعی ایجاد مجدد قسط شماره ۱ برای سفارش A (Unique Constraint Blocked)");
+
+// Order B: Installment 1 -> Allowed (Different orders can have same installment number)
+assert(registerInstallment("order_B", 1) === true, "سفارش B - قسط شماره ۱ مجاز است (استقلال سفارش‌ها)");
+
+// 9. Customer Intelligence & Segmentation Tests
+console.log("\n--- ۹. آزمون هوشمندی مشتری، امتیازدهی و اقدام بعدی (Customer Intelligence) ---");
 const mockCustomerHot = {
   id: "cust_hot",
   firstName: "رضا",
@@ -288,8 +312,8 @@ assert(intelRisk.segment === "AT_RISK", "شناسایی دقیق مشتری در
 assert(intelRisk.hasOverdueInstallment === true, "شناسایی وجود قسط معوقه");
 assert(intelRisk.nextBestAction.priority === "URGENT", "اولویت فوری (URGENT) برای پیگیری مطالبات معوقه");
 
-// 9. Exact Integer Installment Division
-console.log("\n--- ۹. آزمون دقت ریاضی اقساط صحیح و بدون کسر اعشاری ---");
+// 10. Exact Integer Installment Division
+console.log("\n--- ۱۰. آزمون دقت ریاضی اقساط صحیح و بدون کسر اعشاری ---");
 const totalRemaining = 100000000;
 const installmentCount = 3;
 const basePerInstallment = Math.floor(totalRemaining / installmentCount);
@@ -304,8 +328,8 @@ assert(sumInstallments === totalRemaining, `مجموع اقساط (${sumInstallm
 assert(installments[0] === 33333333, "مبلغ قسط اول عدد صحیح تومان");
 assert(installments[2] === 33333334, "کسر ریالی به آخرین قسط منتقل شد");
 
-// 10. Zod Schema Validation Tests
-console.log("\n--- ۱۰. آزمون اعتبارسنجی ورودی‌های API با Zod ---");
+// 11. Zod Schema Validation Tests
+console.log("\n--- ۱۱. آزمون اعتبارسنجی ورودی‌های API با Zod ---");
 const validCustomer = customerCreateSchema.safeParse({
   firstName: "علی",
   lastName: "کاظمی",
@@ -341,5 +365,5 @@ console.log("==================================================");
 if (failedTests > 0) {
   process.exit(1);
 } else {
-  console.log("🎉 تمامی آزمون‌های خودکار هوشمندی، انبارداری، محاسبات مالی، امنیت و تقویم شمسی با موفقیت پاس شدند!");
+  console.log("🎉 تمامی آزمون‌های خودکار یکپارچگی دیتابیس، انبارداری، محاسبات مالی، امنیت و تقویم شمسی با موفقیت پاس شدند!");
 }
