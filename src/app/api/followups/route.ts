@@ -3,6 +3,7 @@ import prisma from "@/lib/prisma";
 import { getSessionFromRequest } from "@/lib/auth";
 import { logAuditEvent } from "@/lib/audit";
 import { followUpCreateSchema, followUpUpdateSchema } from "@/lib/validations/schemas";
+import { evaluateCustomerIntelligence } from "@/lib/customer-intelligence";
 
 export async function GET(req: NextRequest) {
   try {
@@ -33,7 +34,58 @@ export async function GET(req: NextRequest) {
       orderBy: { scheduledAt: "asc" },
     });
 
-    return NextResponse.json({ followUps });
+    // Generate Dynamic "Today's Sales Next Best Actions"
+    const customerFilter = session.role === "SALES_REP" ? { assignedToId: session.userId } : {};
+    const relevantCustomers = await prisma.customer.findMany({
+      where: customerFilter,
+      include: {
+        orders: { include: { installments: true } },
+        deals: true,
+        followUps: true,
+        needProfiles: true,
+        assignedTo: { select: { name: true } },
+      },
+      take: 30,
+    });
+
+    const todaysSuggestedActions: any[] = [];
+
+    for (const c of relevantCustomers) {
+      const intel = evaluateCustomerIntelligence(c);
+      if (
+        intel.nextBestAction.priority === "URGENT" ||
+        intel.nextBestAction.priority === "HIGH" ||
+        intel.segment === "HOT" ||
+        intel.segment === "AT_RISK"
+      ) {
+        todaysSuggestedActions.push({
+          customerId: c.id,
+          customerCode: c.code,
+          customerName: `${c.firstName} ${c.lastName}`,
+          phone: c.phone,
+          score: intel.score,
+          segment: intel.segment,
+          action: intel.nextBestAction.action,
+          reason: intel.nextBestAction.reason,
+          priority: intel.nextBestAction.priority,
+          suggestedDate: intel.nextBestAction.suggestedDate,
+          actionType: intel.nextBestAction.actionType,
+        });
+      }
+    }
+
+    // Sort priority: URGENT first, then HIGH, then score descending
+    todaysSuggestedActions.sort((a, b) => {
+      const pOrder: Record<string, number> = { URGENT: 3, HIGH: 2, MEDIUM: 1, LOW: 0 };
+      const diff = (pOrder[b.priority] || 0) - (pOrder[a.priority] || 0);
+      if (diff !== 0) return diff;
+      return b.score - a.score;
+    });
+
+    return NextResponse.json({
+      followUps,
+      todaysSuggestedActions: todaysSuggestedActions.slice(0, 8),
+    });
   } catch (error: any) {
     console.error("Error fetching follow-ups:", error);
     return NextResponse.json({ error: "خطا در دریافت لیست پیگیری‌ها" }, { status: 500 });

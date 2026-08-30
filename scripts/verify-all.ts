@@ -10,6 +10,7 @@ import {
 import { calculateTemperature, SCORE_WEIGHTS } from "../src/lib/scoring";
 import { recommendCarpets } from "../src/lib/recommendation";
 import { customerCreateSchema, orderCreateSchema } from "../src/lib/validations/schemas";
+import { evaluateCustomerIntelligence } from "../src/lib/customer-intelligence";
 
 console.log("==================================================");
 console.log("🧪 شروع آزمایش‌های خودکار سیستم CRM فروش فرش...");
@@ -77,6 +78,7 @@ const mockProducts = [
         id: "v1",
         sku: "CRP-01-3X4",
         size: "3x4",
+        areaSquareMeters: 12,
         cashPrice: 48000000,
         installmentPrice: 54000000,
         stock: 5,
@@ -100,6 +102,7 @@ const mockProducts = [
         id: "v2",
         sku: "CRP-02-2X3",
         size: "2x3",
+        areaSquareMeters: 6,
         cashPrice: 18000000,
         installmentPrice: 21000000,
         stock: 8,
@@ -116,6 +119,7 @@ const recResults = recommendCarpets(
     preferredColors: ["سرمه‌ای"],
     preferredStyle: "کلاسیک",
     budgetMax: 50000000,
+    previousPurchasedCollections: ["اصفهان"],
   },
   mockProducts as any
 );
@@ -123,9 +127,111 @@ const recResults = recommendCarpets(
 assert(recResults.length > 0, "استخراج موفق پیشنهادات منطبق");
 assert(recResults[0].product.name.includes("اصفهان"), "بالاترین امتیاز تطابق برای فرش شاه‌عباسی اصفهان");
 assert(recResults[0].matchScore >= 80, `امتیاز تطابق بالای ۸۰٪ (امتیاز واقعی: ${recResults[0].matchScore}٪)`);
+assert(recResults[0].stockStatus === "AVAILABLE", "تشخیص وضعیت موجودی آماده تحویل");
 
-// 6. Financial Calculation & Exact Installment Splitting Tests
-console.log("\n--- ۶. آزمون دقت محاسبات مالی و اقساط بدون پرتی اعشاری ---");
+// 6. Customer Intelligence & Segmentation Tests
+console.log("\n--- ۶. آزمون هوشمندی مشتری، امتیازدهی و اقدام بعدی (Customer Intelligence) ---");
+const mockCustomerHot = {
+  id: "cust_hot",
+  firstName: "رضا",
+  lastName: "تهرانی",
+  createdAt: new Date().toISOString(),
+  orders: [
+    {
+      id: "ord_1",
+      finalAmount: 90000000,
+      paidAmount: 90000000,
+      remainingAmount: 0,
+      status: "PAID",
+      createdAt: new Date().toISOString(),
+      installments: [],
+    },
+    {
+      id: "ord_2",
+      finalAmount: 45000000,
+      paidAmount: 45000000,
+      remainingAmount: 0,
+      status: "PAID",
+      createdAt: new Date().toISOString(),
+      installments: [],
+    },
+  ],
+  deals: [
+    {
+      id: "deal_1",
+      title: "خرید ۳ تخته ۱۲ متری",
+      value: 95000000,
+      stage: "NEGOTIATION",
+      updatedAt: new Date().toISOString(),
+    },
+  ],
+  followUps: [
+    {
+      id: "fu_1",
+      title: "تماس تلفنی",
+      status: "DONE",
+      scheduledAt: new Date().toISOString(),
+      completedAt: new Date().toISOString(),
+    },
+  ],
+  needProfiles: [
+    {
+      preferredSizes: '["3x4"]',
+      preferredColors: '["سرمه‌ای"]',
+      budgetMax: 100000000,
+    },
+  ],
+};
+
+const intelHot = evaluateCustomerIntelligence(mockCustomerHot);
+assert(intelHot.score >= 80, `امتیاز بالای ۸۰ برای مشتری وفادار و کلان (امتیاز: ${intelHot.score})`);
+assert(intelHot.segment === "HIGH_VALUE" || intelHot.segment === "REPEAT_BUYER", `دسته‌بندی پرارزش یا وفادار (دسته‌بندی: ${intelHot.segment})`);
+assert(intelHot.nextBestAction.action.length > 0, `تولید هوشمند اقدام بعدی: ${intelHot.nextBestAction.action}`);
+assert(intelHot.scoreBreakdown.length >= 3, "ارائه دلایل شفاف محاسبه امتیاز هوشمندی");
+
+// At-Risk Customer Test
+const mockCustomerAtRisk = {
+  id: "cust_risk",
+  firstName: "بهرام",
+  lastName: "شاکری",
+  createdAt: new Date(Date.now() - 60 * 24 * 3600 * 1000).toISOString(),
+  orders: [
+    {
+      id: "ord_risk",
+      finalAmount: 40000000,
+      paidAmount: 10000000,
+      remainingAmount: 30000000,
+      status: "PENDING",
+      createdAt: new Date(Date.now() - 40 * 24 * 3600 * 1000).toISOString(),
+      installments: [
+        {
+          id: "inst_overdue",
+          amount: 15000000,
+          status: "OVERDUE",
+          dueDate: new Date(Date.now() - 10 * 24 * 3600 * 1000).toISOString(),
+        },
+      ],
+    },
+  ],
+  deals: [],
+  followUps: [
+    {
+      id: "fu_overdue",
+      title: "تماس پیگیری قسط",
+      status: "OVERDUE",
+      scheduledAt: new Date(Date.now() - 5 * 24 * 3600 * 1000).toISOString(),
+    },
+  ],
+  needProfiles: [],
+};
+
+const intelRisk = evaluateCustomerIntelligence(mockCustomerAtRisk);
+assert(intelRisk.segment === "AT_RISK", "شناسایی دقیق مشتری در معرض ریسک (AT_RISK)");
+assert(intelRisk.hasOverdueInstallment === true, "شناسایی وجود قسط معوقه");
+assert(intelRisk.nextBestAction.priority === "URGENT", "اولویت فوری (URGENT) برای پیگیری مطالبات معوقه");
+
+// 7. Financial Calculation & Exact Installment Splitting Tests
+console.log("\n--- ۷. آزمون دقت محاسبات مالی و اقساط بدون پرتی اعشاری ---");
 const totalRemaining = 100000000; // 100 million Tomans
 const installmentCount = 3;
 const basePerInstallment = Math.floor(totalRemaining / installmentCount);
@@ -140,8 +246,8 @@ assert(sumInstallments === totalRemaining, `مجموع اقساط (${sumInstallm
 assert(installments[0] === 33333333, "مبلغ قسط اول دقیق و بدون اعشار");
 assert(installments[2] === 33333334, "کسر ریالی به آخرین قسط اضافه شد");
 
-// 7. Zod Schema Validation Tests
-console.log("\n--- ۷. آزمون اعتبارسنجی ورودی‌های API با Zod ---");
+// 8. Zod Schema Validation Tests
+console.log("\n--- ۸. آزمون اعتبارسنجی ورودی‌های API با Zod ---");
 const validCustomer = customerCreateSchema.safeParse({
   firstName: "علی",
   lastName: "کاظمی",
@@ -177,5 +283,5 @@ console.log("==================================================");
 if (failedTests > 0) {
   process.exit(1);
 } else {
-  console.log("🎉 تمامی آزمون‌های خودکار امنیتی، منطق تجاری و محاسبات با موفقیت پاس شدند!");
+  console.log("🎉 تمامی آزمون‌های خودکار هوشمندی، پیشنهاد فرش، محاسبات مالی و امنیت با موفقیت پاس شدند!");
 }

@@ -5,6 +5,7 @@ import { normalizeIranianPhone, isValidIranianMobile } from "@/lib/persian";
 import { logAuditEvent } from "@/lib/audit";
 import { customerCreateSchema } from "@/lib/validations/schemas";
 import { generateCustomerCode } from "@/lib/generators";
+import { evaluateCustomerIntelligence } from "@/lib/customer-intelligence";
 
 export async function GET(req: NextRequest) {
   try {
@@ -15,6 +16,8 @@ export async function GET(req: NextRequest) {
     const search = searchParams.get("search")?.trim() || "";
     const province = searchParams.get("province")?.trim() || "";
     const repId = searchParams.get("repId")?.trim() || "";
+    const segmentFilter = searchParams.get("segment")?.trim() || "";
+    const sortBy = searchParams.get("sort")?.trim() || "score_desc";
 
     const whereClause: any = {};
 
@@ -37,20 +40,54 @@ export async function GET(req: NextRequest) {
       ];
     }
 
-    const customers = await prisma.customer.findMany({
+    const rawCustomers = await prisma.customer.findMany({
       where: whereClause,
       include: {
         assignedTo: { select: { id: true, name: true, avatar: true } },
         needProfiles: true,
         orders: {
-          select: { id: true, orderNumber: true, finalAmount: true, status: true },
+          include: { installments: true },
+          orderBy: { createdAt: "desc" },
+        },
+        deals: {
+          orderBy: { updatedAt: "desc" },
+        },
+        followUps: {
+          orderBy: { scheduledAt: "desc" },
         },
         _count: { select: { orders: true, deals: true, followUps: true } },
       },
       orderBy: { createdAt: "desc" },
     });
 
-    return NextResponse.json({ customers });
+    // Compute Customer Intelligence for each customer
+    let customersWithIntelligence = rawCustomers.map((c) => {
+      const intelligence = evaluateCustomerIntelligence(c);
+      return {
+        ...c,
+        intelligence,
+      };
+    });
+
+    // Apply Segment Filtering if requested
+    if (segmentFilter) {
+      customersWithIntelligence = customersWithIntelligence.filter(
+        (c) => c.intelligence.segment === segmentFilter
+      );
+    }
+
+    // Apply Sorting
+    if (sortBy === "score_desc") {
+      customersWithIntelligence.sort((a, b) => b.intelligence.score - a.intelligence.score);
+    } else if (sortBy === "spent_desc") {
+      customersWithIntelligence.sort((a, b) => b.intelligence.totalSpent - a.intelligence.totalSpent);
+    } else if (sortBy === "created_desc") {
+      customersWithIntelligence.sort(
+        (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
+      );
+    }
+
+    return NextResponse.json({ customers: customersWithIntelligence });
   } catch (error: any) {
     console.error("Error fetching customers:", error);
     return NextResponse.json({ error: "خطا در دریافت لیست مشتریان" }, { status: 500 });

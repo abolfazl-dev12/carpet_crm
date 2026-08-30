@@ -8,7 +8,9 @@ export interface CarpetRecommendationInput {
   preferredStyle?: string | null;  // e.g. "کلاسیک", "مدرن"
   preferredCollection?: string | null; // e.g. "اصفهان", "کاشان"
   budgetMax?: number | null;
+  budgetMin?: number | null;
   paymentPreference?: "CASH" | "INSTALLMENT" | "HYBRID";
+  previousPurchasedCollections?: string[]; // for repeat affinity bonus
 }
 
 export interface CarpetProductWithVariants {
@@ -22,14 +24,17 @@ export interface CarpetProductWithVariants {
   style: string;
   primaryColor: string;
   images: string; // JSON array
+  description?: string | null;
   variants: Array<{
     id: string;
     sku: string;
     size: string;
+    areaSquareMeters: number;
     cashPrice: number;
     installmentPrice: number;
     stock: number;
     reservedStock: number;
+    soldStock?: number;
   }>;
 }
 
@@ -39,6 +44,7 @@ export interface CarpetRecommendationResult {
   matchScore: number; // 0 - 100
   matchReasons: string[];
   stockStatus: "AVAILABLE" | "LOW_STOCK" | "OUT_OF_STOCK";
+  availableStock: number;
 }
 
 /**
@@ -56,7 +62,7 @@ export function recommendCarpets(
       const reasons: string[] = [];
 
       // 1. Size matching (Weight: 30 pts)
-      if (input.preferredSizes.length > 0) {
+      if (input.preferredSizes && input.preferredSizes.length > 0) {
         if (input.preferredSizes.includes(variant.size)) {
           score += 30;
           reasons.push(`تطابق دقیق ابعاد انتخابی (${formatCarpetSize(variant.size)})`);
@@ -90,7 +96,7 @@ export function recommendCarpets(
       }
 
       // 3. Color matching (Weight: 20 pts)
-      if (input.preferredColors.length > 0) {
+      if (input.preferredColors && input.preferredColors.length > 0) {
         const hasColor = input.preferredColors.some((c) =>
           product.primaryColor.includes(c) || c.includes(product.primaryColor)
         );
@@ -134,14 +140,24 @@ export function recommendCarpets(
         score += 8;
       }
 
+      // 6. Previous purchase affinity bonus (+5 pts)
+      if (
+        input.previousPurchasedCollections &&
+        input.previousPurchasedCollections.includes(product.collection)
+      ) {
+        score += 5;
+        reasons.push(`همخوانی با خریدهای قبلی از کلکسیون ${product.collection}`);
+      }
+
       // Stock availability evaluation
-      const availableStock = variant.stock - variant.reservedStock;
+      const availableStock = Math.max(0, variant.stock - (variant.reservedStock || 0));
       let stockStatus: "AVAILABLE" | "LOW_STOCK" | "OUT_OF_STOCK" = "OUT_OF_STOCK";
       if (availableStock > 2) {
         stockStatus = "AVAILABLE";
+        reasons.push(`موجودی آماده تحویل (${toPersianDigits(availableStock)} تخته)`);
       } else if (availableStock > 0) {
         stockStatus = "LOW_STOCK";
-        reasons.push("موجودی انبار محدود (نیاز به اقدام سریع)");
+        reasons.push(`موجودی انبار محدود (${toPersianDigits(availableStock)} تخته - اقدام فوری)`);
       } else {
         stockStatus = "OUT_OF_STOCK";
         // Deduct points if completely out of stock
@@ -158,6 +174,7 @@ export function recommendCarpets(
           matchScore: finalScore,
           matchReasons: reasons,
           stockStatus,
+          availableStock,
         });
       }
     }

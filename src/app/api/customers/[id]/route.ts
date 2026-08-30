@@ -4,6 +4,8 @@ import { getSessionFromRequest } from "@/lib/auth";
 import { logAuditEvent } from "@/lib/audit";
 import { customerUpdateSchema } from "@/lib/validations/schemas";
 import { normalizeIranianPhone, isValidIranianMobile } from "@/lib/persian";
+import { evaluateCustomerIntelligence } from "@/lib/customer-intelligence";
+import { recommendCarpets } from "@/lib/recommendation";
 
 export async function GET(
   req: NextRequest,
@@ -19,17 +21,25 @@ export async function GET(
       include: {
         needProfiles: true,
         assignedTo: { select: { id: true, name: true, phone: true, avatar: true } },
-        deals: { include: { product: true, variant: true } },
+        deals: {
+          include: { product: true, variant: true },
+          orderBy: { createdAt: "desc" },
+        },
         orders: {
           include: {
             items: { include: { variant: { include: { product: true } } } },
-            payments: true,
-            installments: true,
+            payments: { orderBy: { paidAt: "desc" } },
+            installments: { orderBy: { installmentNumber: "asc" } },
           },
           orderBy: { createdAt: "desc" },
         },
-        followUps: { orderBy: { scheduledAt: "desc" } },
-        leads: true,
+        followUps: {
+          include: { assignedTo: { select: { name: true } } },
+          orderBy: { scheduledAt: "desc" },
+        },
+        leads: {
+          orderBy: { createdAt: "desc" },
+        },
       },
     });
 
@@ -40,10 +50,140 @@ export async function GET(
       return NextResponse.json({ error: "عدم دسترسی به این پرونده مشتری" }, { status: 403 });
     }
 
-    return NextResponse.json({ customer });
+    // 1. Calculate Real Customer Intelligence
+    const intelligence = evaluateCustomerIntelligence(customer);
+
+    // 2. Fetch Active Products Catalog for Real Carpet Recommendations
+    const activeProducts = await prisma.product.findMany({
+      where: { isActive: true },
+      include: { variants: true },
+    });
+
+    const needProfile = customer.needProfiles?.[0];
+    let recommendations: any[] = [];
+
+    if (needProfile) {
+      const preferredSizes = needProfile.preferredSizes ? JSON.parse(needProfile.preferredSizes) : [];
+      const preferredColors = needProfile.preferredColors ? JSON.parse(needProfile.preferredColors) : [];
+
+      // Extract previous purchased collections for affinity bonus
+      const previousPurchasedCollections = customer.orders.flatMap((o) =>
+        o.items.map((it) => it.variant?.product?.collection).filter(Boolean)
+      );
+
+      recommendations = recommendCarpets(
+        {
+          preferredSizes,
+          preferredShane: needProfile.preferredShane,
+          preferredDensity: needProfile.preferredDensity,
+          preferredColors,
+          preferredStyle: needProfile.preferredStyle,
+          preferredCollection: needProfile.preferredCollection,
+          budgetMin: needProfile.budgetMin,
+          budgetMax: needProfile.budgetMax,
+          paymentPreference: needProfile.paymentPreference,
+          previousPurchasedCollections,
+        },
+        activeProducts as any
+      ).slice(0, 6);
+    } else {
+      // General top matches
+      recommendations = recommendCarpets(
+        { preferredSizes: ["3x4"], preferredColors: ["سرمه‌ای"] },
+        activeProducts as any
+      ).slice(0, 4);
+    }
+
+    // 3. Construct Unified Chronological Activity Timeline
+    const timelineEvents: Array<{
+      id: string;
+      type: "CUSTOMER_CREATED" | "LEAD_CREATED" | "FOLLOWUP" | "DEAL" | "ORDER" | "PAYMENT" | "INSTALLMENT";
+      title: string;
+      description?: string;
+      timestamp: Date;
+      metadata?: any;
+    }> = [];
+
+    // Customer Registration
+    timelineEvents.push({
+      id: `cust_created_${customer.id}`,
+      type: "CUSTOMER_CREATED",
+      title: "ثبت و افتتاح پرونده مشتری در سامانه",
+      description: `ثبت توسط ${customer.assignedTo?.name || "سیستم"} در استان ${customer.province}، شهر ${customer.city}`,
+      timestamp: new Date(customer.createdAt),
+    });
+
+    // Linked Leads
+    for (const l of customer.leads) {
+      timelineEvents.push({
+        id: `lead_${l.id}`,
+        type: "LEAD_CREATED",
+        title: `ثبت سرنخ اولیه فروش (منبع: ${l.source})`,
+        description: `امتیاز اولیه: ${l.score} • وضعیت: ${l.status}`,
+        timestamp: new Date(l.createdAt),
+      });
+    }
+
+    // Follow-ups
+    for (const f of customer.followUps) {
+      timelineEvents.push({
+        id: `fu_${f.id}`,
+        type: "FOLLOWUP",
+        title: `وظیفه پیگیری: ${f.title}`,
+        description: f.resultNote ? `گزارش: ${f.resultNote}` : `وضعیت: ${f.status === "DONE" ? "انجام‌شده" : "در انتظار"}`,
+        timestamp: new Date(f.completedAt || f.scheduledAt),
+        metadata: { status: f.status, type: f.type },
+      });
+    }
+
+    // Deals
+    for (const d of customer.deals) {
+      timelineEvents.push({
+        id: `deal_${d.id}`,
+        type: "DEAL",
+        title: `معامله پایپ‌لاین: ${d.title}`,
+        description: `ارزش: ${d.value.toLocaleString()} تومان • مرحله: ${d.stage}`,
+        timestamp: new Date(d.createdAt),
+        metadata: { stage: d.stage, value: d.value },
+      });
+    }
+
+    // Orders
+    for (const o of customer.orders) {
+      timelineEvents.push({
+        id: `order_${o.id}`,
+        type: "ORDER",
+        title: `صدور فاکتور فروش شماره ${o.orderNumber}`,
+        description: `مبلغ کل: ${o.finalAmount.toLocaleString()} تومان • شامل ${o.items.length} قلم فرش`,
+        timestamp: new Date(o.createdAt),
+        metadata: { orderNumber: o.orderNumber, amount: o.finalAmount },
+      });
+
+      // Payments inside order
+      for (const p of o.payments) {
+        timelineEvents.push({
+          id: `pay_${p.id}`,
+          type: "PAYMENT",
+          title: `دریافت و ثبت تراکنش مالی (${p.method})`,
+          description: `مبلغ واریزی: ${p.amount.toLocaleString()} تومان • رهگیری: ${p.trackingNumber || "-"}`,
+          timestamp: new Date(p.paidAt),
+          metadata: { amount: p.amount, method: p.method },
+        });
+      }
+    }
+
+    // Sort Timeline Descending by Date
+    timelineEvents.sort((a, b) => b.timestamp.getTime() - a.timestamp.getTime());
+
+    return NextResponse.json({
+      customer,
+      intelligence,
+      recommendations,
+      activityTimeline: timelineEvents,
+    });
   } catch (error: any) {
-    console.error("Error fetching customer:", error);
-    return NextResponse.json({ error: "خطا در دریافت پروفایل مشتری" }, { status: 500 });
+    console.error("Error fetching customer 360:", error);
+    return NextResponse.json({ error: "خطا در دریافت پروفایل ۳۶۰ مشتری" }, { status: 500 });
   }
 }
 
