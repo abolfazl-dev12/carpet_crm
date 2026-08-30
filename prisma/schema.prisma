@@ -198,7 +198,7 @@ model Lead {
   status            LeadStatus      @default(NEW)
   score             Int             @default(10)
   temperature       LeadTemperature @default(COLD)
-  estimatedBudget   Float?
+  estimatedBudget   Int?
   purchaseTimeframe String?
   notes             String?
   createdAt         DateTime        @default(now())
@@ -229,8 +229,8 @@ model CarpetNeedProfile {
   preferredColors     String            // JSON array e.g. ["سرمه‌ای", "کرم"]
   preferredStyle      String?           // e.g. "کلاسیک", "مدرن", "وینتیج"
   preferredCollection String?           // e.g. "اصفهان", "کاشان"
-  budgetMin           Float?
-  budgetMax           Float?
+  budgetMin           Int?
+  budgetMax           Int?
   quantity            Int               @default(1)
   paymentPreference   PaymentPreference @default(CASH)
   spaceType           String?           // e.g. "پذیرایی", "اتاق خواب"
@@ -281,8 +281,8 @@ model ProductVariant {
   sku               String   @unique
   size              String   // e.g. "2x3", "2.5x3.5", "3x4", "1.5x2.25", "1x1.5", "1x3"
   areaSquareMeters  Float
-  cashPrice         Float
-  installmentPrice  Float
+  cashPrice         Int
+  installmentPrice  Int
   stock             Int      @default(0)
   reservedStock     Int      @default(0)
   soldStock         Int      @default(0)
@@ -317,7 +317,7 @@ model InventoryMovement {
 model Deal {
   id                String     @id @default(cuid())
   title             String
-  value             Float      @default(0)
+  value             Int        @default(0)
   stage             LeadStatus @default(NEW)
   priority          Priority   @default(MEDIUM)
   expectedCloseDate DateTime?
@@ -379,13 +379,13 @@ model FollowUp {
 model Order {
   id              String        @id @default(cuid())
   orderNumber     String        @unique
-  totalAmount     Float
-  discountAmount  Float         @default(0)
-  taxAmount       Float         @default(0)
-  finalAmount     Float
+  totalAmount     Int
+  discountAmount  Int           @default(0)
+  taxAmount       Int           @default(0)
+  finalAmount     Int
   paymentMethod   PaymentMethod @default(CASH)
-  paidAmount      Float         @default(0)
-  remainingAmount Float         @default(0)
+  paidAmount      Int           @default(0)
+  remainingAmount Int           @default(0)
   status          OrderStatus   @default(CONFIRMED)
   shippingAddress String?
   shippingStatus  String        @default("PREPARING")
@@ -415,8 +415,8 @@ model OrderItem {
   variantId  String
   variant    ProductVariant @relation(fields: [variantId], references: [id])
   quantity   Int            @default(1)
-  unitPrice  Float
-  totalPrice Float
+  unitPrice  Int
+  totalPrice Int
   notes      String?
 }
 
@@ -424,7 +424,7 @@ model Payment {
   id             String        @id @default(cuid())
   orderId        String
   order          Order         @relation(fields: [orderId], references: [id], onDelete: Cascade)
-  amount         Float
+  amount         Int
   method         PaymentMethod @default(POS)
   trackingNumber String?
   paidAt         DateTime      @default(now())
@@ -440,7 +440,7 @@ model Installment {
   orderId           String
   order             Order             @relation(fields: [orderId], references: [id], onDelete: Cascade)
   installmentNumber Int
-  amount            Float
+  amount            Int
   dueDate           DateTime
   status            InstallmentStatus @default(PENDING)
   paidDate          DateTime?

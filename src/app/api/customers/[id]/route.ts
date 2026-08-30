@@ -87,11 +87,8 @@ export async function GET(
         activeProducts as any
       ).slice(0, 6);
     } else {
-      // General top matches
-      recommendations = recommendCarpets(
-        { preferredSizes: ["3x4"], preferredColors: ["سرمه‌ای"] },
-        activeProducts as any
-      ).slice(0, 4);
+      // General catalog showcase without fabricating customer preferences
+      recommendations = recommendCarpets({}, activeProducts as any).slice(0, 4);
     }
 
     // 3. Construct Unified Chronological Activity Timeline
@@ -212,10 +209,8 @@ export async function PUT(
     }
 
     // Server-side RBAC: Sales reps can only update their own customers and cannot reassign
-    if (session.role === "SALES_REP") {
-      if (currentCustomer.assignedToId !== session.userId) {
-        return NextResponse.json({ error: "عدم دسترسی برای ویرایش این مشتری" }, { status: 403 });
-      }
+    if (session.role === "SALES_REP" && currentCustomer.assignedToId !== session.userId) {
+      return NextResponse.json({ error: "عدم دسترسی برای ویرایش این مشتری" }, { status: 403 });
     }
 
     const {
@@ -344,8 +339,37 @@ export async function DELETE(
     }
 
     const { id } = await params;
-    await prisma.customer.delete({
+
+    const customer = await prisma.customer.findUnique({
       where: { id },
+      include: {
+        _count: {
+          select: { orders: true, deals: true },
+        },
+      },
+    });
+
+    if (!customer) {
+      return NextResponse.json({ error: "مشتری یافت نشد." }, { status: 404 });
+    }
+
+    // Financial & Referential Integrity Guard:
+    // Block deleting customer if they have order records to prevent ledger inconsistency
+    if (customer._count.orders > 0) {
+      return NextResponse.json(
+        {
+          error:
+            "امکان حذف این مشتری به دلیل وجود سوابق مالی و فاکتورهای فروش ثبت‌شده وجود ندارد. سوابق مالی جهت حفظ یکپارچگی حسابداری محافظت می‌شوند.",
+        },
+        { status: 400 }
+      );
+    }
+
+    await prisma.$transaction(async (tx) => {
+      await tx.followUp.deleteMany({ where: { customerId: id } });
+      await tx.deal.deleteMany({ where: { customerId: id } });
+      await tx.carpetNeedProfile.deleteMany({ where: { customerId: id } });
+      await tx.customer.delete({ where: { id } });
     });
 
     await logAuditEvent({

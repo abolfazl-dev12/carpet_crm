@@ -59,7 +59,7 @@ export async function PUT(req: NextRequest) {
 
     const installment = await prisma.installment.findUnique({
       where: { id },
-      include: { order: true },
+      include: { order: { include: { payments: true } } },
     });
     if (!installment) return NextResponse.json({ error: "قسط یافت نشد." }, { status: 404 });
 
@@ -68,47 +68,67 @@ export async function PUT(req: NextRequest) {
       return NextResponse.json({ error: "عدم دسترسی برای ویرایش این قسط" }, { status: 403 });
     }
 
-    // Atomic transaction for updating installment, order balances, and payment records
+    const trackingTag = `INST-${installment.orderId}-${installment.installmentNumber}`;
+
+    // Atomic transaction for updating installment, order balances, and ledger payments
     const updated = await prisma.$transaction(async (tx) => {
+      // 1. Transition: Non-PAID -> PAID
+      if (status === "PAID" && installment.status !== "PAID") {
+        // Prevent duplicate payment record if already recorded
+        const existingPayment = await tx.payment.findFirst({
+          where: { orderId: installment.orderId, trackingNumber: trackingTag },
+        });
+
+        if (!existingPayment) {
+          await tx.payment.create({
+            data: {
+              orderId: installment.orderId,
+              amount: Math.round(installment.amount),
+              method: "CHEQUE",
+              trackingNumber: trackingTag,
+              status: "CONFIRMED",
+              notes: `وصول قسط شماره ${installment.installmentNumber} (چک: ${chequeNumber || "-"})`,
+            },
+          });
+        }
+      }
+
+      // 2. Transition: PAID -> Non-PAID (Reversal / Correction)
+      if (status !== "PAID" && installment.status === "PAID") {
+        await tx.payment.deleteMany({
+          where: { orderId: installment.orderId, trackingNumber: trackingTag },
+        });
+      }
+
+      // 3. Update the Installment record
       const updatedInst = await tx.installment.update({
         where: { id },
         data: {
           status,
-          paidDate: status === "PAID" ? new Date() : null,
+          paidDate: status === "PAID" ? (installment.paidDate || new Date()) : null,
           paymentTracking: paymentTracking || null,
           chequeNumber: chequeNumber || null,
           notes: notes || null,
         },
       });
 
-      // If status changed to PAID from another status, update order paid amount and create payment
-      if (status === "PAID" && installment.status !== "PAID") {
-        const newPaid = Math.min(
-          installment.order.finalAmount,
-          Math.round(installment.order.paidAmount + installment.amount)
-        );
-        const newRemaining = Math.max(0, Math.round(installment.order.finalAmount - newPaid));
+      // 4. Recalculate true Ledger-based Paid & Remaining Amount on Order
+      const allConfirmedPayments = await tx.payment.findMany({
+        where: { orderId: installment.orderId, status: "CONFIRMED" },
+      });
 
-        await tx.order.update({
-          where: { id: installment.orderId },
-          data: {
-            paidAmount: newPaid,
-            remainingAmount: newRemaining,
-            status: newRemaining === 0 ? "PAID" : "CONFIRMED",
-          },
-        });
+      const totalPaidSum = allConfirmedPayments.reduce((sum, p) => sum + Math.round(p.amount), 0);
+      const cappedPaid = Math.min(installment.order.finalAmount, Math.max(0, totalPaidSum));
+      const newRemaining = Math.max(0, Math.round(installment.order.finalAmount - cappedPaid));
 
-        await tx.payment.create({
-          data: {
-            orderId: installment.orderId,
-            amount: Math.round(installment.amount),
-            method: "CHEQUE",
-            trackingNumber: paymentTracking || chequeNumber || `INST-${installment.installmentNumber}`,
-            status: "CONFIRMED",
-            notes: `وصول قسط شماره ${installment.installmentNumber}`,
-          },
-        });
-      }
+      await tx.order.update({
+        where: { id: installment.orderId },
+        data: {
+          paidAmount: cappedPaid,
+          remainingAmount: newRemaining,
+          status: newRemaining === 0 ? "PAID" : "CONFIRMED",
+        },
+      });
 
       return updatedInst;
     });
@@ -118,7 +138,11 @@ export async function PUT(req: NextRequest) {
       action: "UPDATE",
       entity: "Installment",
       entityId: id,
-      details: { status, installmentNumber: installment.installmentNumber },
+      details: {
+        status,
+        installmentNumber: installment.installmentNumber,
+        orderId: installment.orderId,
+      },
     });
 
     return NextResponse.json({ success: true, installment: updated });

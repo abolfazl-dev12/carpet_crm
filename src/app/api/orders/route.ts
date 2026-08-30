@@ -4,6 +4,7 @@ import { getSessionFromRequest } from "@/lib/auth";
 import { logAuditEvent } from "@/lib/audit";
 import { orderCreateSchema } from "@/lib/validations/schemas";
 import { generateOrderNumber } from "@/lib/generators";
+import { addJalaliMonths } from "@/lib/persian";
 
 export async function GET(req: NextRequest) {
   try {
@@ -86,7 +87,7 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // Precise financial calculations
+    // Precise financial calculations (integer Tomans)
     const cleanDiscount = Math.max(0, Math.round(discountAmount || 0));
     const totalAmount = items.reduce(
       (sum, it) => sum + Math.round(Number(it.unitPrice)) * Math.max(1, Math.round(Number(it.quantity))),
@@ -96,10 +97,41 @@ export async function POST(req: NextRequest) {
     const paidAmount = Math.min(finalAmount, Math.max(0, Math.round(initialPaidAmount || 0)));
     const remainingAmount = Math.max(0, finalAmount - paidAmount);
 
-    // Atomically execute order creation, item creation, stock adjustment, initial payment, and installment schedule
+    // Atomically execute: stock validation, order creation, inventory deduction, movement logging, payment, installments
     const order = await prisma.$transaction(async (tx) => {
+      // 1. Stock Validation & Race-condition check inside transaction
+      const variantStockSnapshots: Record<string, { currentStock: number; requestedQty: number; name: string; size: string }> = {};
+
+      for (const item of items) {
+        const qty = Math.max(1, Math.round(Number(item.quantity)));
+        const variant = await tx.productVariant.findUnique({
+          where: { id: item.variantId },
+          include: { product: true },
+        });
+
+        if (!variant) {
+          throw new Error("یکی از کالاهای انتخاب‌شده در انبار یافت نشد.");
+        }
+
+        const availableStock = variant.stock - (variant.reservedStock || 0);
+        if (qty > availableStock) {
+          throw new Error(
+            `موجودی کافی برای ثبت این سفارش وجود ندارد. کالا: "${variant.product.name} (${variant.size})"، موجودی آزاد: ${availableStock} تخته، تعداد درخواستی: ${qty} تخته`
+          );
+        }
+
+        variantStockSnapshots[item.variantId] = {
+          currentStock: variant.stock,
+          requestedQty: qty,
+          name: variant.product.name,
+          size: variant.size,
+        };
+      }
+
+      // 2. Generate unique order number
       const orderNumber = await generateOrderNumber(tx);
 
+      // 3. Create Order and OrderItems
       const createdOrder = await tx.order.create({
         data: {
           orderNumber,
@@ -126,7 +158,37 @@ export async function POST(req: NextRequest) {
         include: { items: true, customer: true },
       });
 
-      // Record initial payment if provided
+      // 4. Atomically Deduct Stock and Record Inventory Movements (Auditability)
+      for (const item of items) {
+        const qty = Math.max(1, Math.round(Number(item.quantity)));
+        const snapshot = variantStockSnapshots[item.variantId];
+
+        const updatedVariant = await tx.productVariant.update({
+          where: { id: item.variantId },
+          data: {
+            stock: { decrement: qty },
+            soldStock: { increment: qty },
+          },
+        });
+
+        if (updatedVariant.stock < 0) {
+          throw new Error("خطای همزمانی در انبار: موجودی منفی شد.");
+        }
+
+        await tx.inventoryMovement.create({
+          data: {
+            variantId: item.variantId,
+            type: "SALE",
+            quantity: qty,
+            previousStock: snapshot.currentStock,
+            newStock: updatedVariant.stock,
+            reason: `فروش قطعی در فاکتور شماره ${orderNumber}`,
+            userId: session.userId,
+          },
+        });
+      }
+
+      // 5. Record initial payment if provided
       if (paidAmount > 0) {
         await tx.payment.create({
           data: {
@@ -140,16 +202,16 @@ export async function POST(req: NextRequest) {
         });
       }
 
-      // Generate precise installments schedule if installment payment
+      // 6. Generate precise installments schedule with Jalali calendar months
       if (paymentMethod === "INSTALLMENT" && installmentCount > 0 && remainingAmount > 0) {
         const count = Math.max(1, Math.round(installmentCount));
         const basePerInstallment = Math.floor(remainingAmount / count);
         const remainder = remainingAmount - basePerInstallment * count;
+        const now = new Date();
 
         for (let i = 1; i <= count; i++) {
           const amount = i === count ? basePerInstallment + remainder : basePerInstallment;
-          const dueDate = new Date();
-          dueDate.setMonth(dueDate.getMonth() + i);
+          const dueDate = addJalaliMonths(now, i);
 
           await tx.installment.create({
             data: {
@@ -178,7 +240,11 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ success: true, order });
   } catch (error: any) {
     console.error("Error creating order:", error);
-    return NextResponse.json({ error: "خطا در ثبت سفارش فرش" }, { status: 500 });
+    const errorMessage = error?.message || "خطا در ثبت سفارش فرش";
+    return NextResponse.json(
+      { error: errorMessage.includes("موجودی") || errorMessage.includes("همزمانی") ? errorMessage : "خطا در ثبت سفارش فرش" },
+      { status: 400 }
+    );
   }
 }
 

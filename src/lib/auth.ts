@@ -2,6 +2,7 @@ import { SignJWT, jwtVerify } from "jose";
 import bcrypt from "bcryptjs";
 import { cookies } from "next/headers";
 import { NextRequest } from "next/server";
+import prisma from "@/lib/prisma";
 
 export const AUTH_COOKIE_NAME = "carpet_crm_session";
 
@@ -76,7 +77,17 @@ export async function getSession(): Promise<SessionPayload | null> {
   const cookieStore = await cookies();
   const token = cookieStore.get(AUTH_COOKIE_NAME)?.value;
   if (!token) return null;
-  return verifySessionToken(token);
+  const payload = await verifySessionToken(token);
+  if (!payload?.userId) return null;
+
+  // Verify user exists and is active in database
+  const user = await prisma.user.findUnique({
+    where: { id: payload.userId },
+    select: { id: true, isActive: true, role: true },
+  });
+
+  if (!user || !user.isActive) return null;
+  return { ...payload, role: user.role };
 }
 
 /**
@@ -85,7 +96,17 @@ export async function getSession(): Promise<SessionPayload | null> {
 export async function getSessionFromRequest(req: NextRequest): Promise<SessionPayload | null> {
   const token = req.cookies.get(AUTH_COOKIE_NAME)?.value;
   if (!token) return null;
-  return verifySessionToken(token);
+  const payload = await verifySessionToken(token);
+  if (!payload?.userId) return null;
+
+  // Active User Verification against Database (Instant revocation if disabled)
+  const user = await prisma.user.findUnique({
+    where: { id: payload.userId },
+    select: { id: true, isActive: true, role: true },
+  });
+
+  if (!user || !user.isActive) return null;
+  return { ...payload, role: user.role };
 }
 
 /**

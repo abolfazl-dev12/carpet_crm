@@ -1,10 +1,10 @@
 import { formatCarpetSize, formatToman, toPersianDigits } from "./persian";
 
 export interface CarpetRecommendationInput {
-  preferredSizes: string[];       // e.g. ["2x3", "3x4"]
+  preferredSizes?: string[];       // e.g. ["2x3", "3x4"]
   preferredShane?: string | null;  // e.g. "1200"
   preferredDensity?: string | null;// e.g. "3600"
-  preferredColors: string[];      // e.g. ["سرمه‌ای", "کرم"]
+  preferredColors?: string[];      // e.g. ["سرمه‌ای", "کرم"]
   preferredStyle?: string | null;  // e.g. "کلاسیک", "مدرن"
   preferredCollection?: string | null; // e.g. "اصفهان", "کاشان"
   budgetMax?: number | null;
@@ -41,20 +41,40 @@ export interface CarpetProductWithVariants {
 export interface CarpetRecommendationResult {
   product: CarpetProductWithVariants;
   matchedVariant: CarpetProductWithVariants["variants"][0];
-  matchScore: number; // 0 - 100
+  matchScore: number; // 0 - 100 strictly normalized
   matchReasons: string[];
   stockStatus: "AVAILABLE" | "LOW_STOCK" | "OUT_OF_STOCK";
   availableStock: number;
+  isPersonalized: boolean;
 }
 
 /**
- * Deterministic Carpet Recommendation Matching Engine
+ * Deterministic, Normalized Carpet Recommendation Matching Engine (Max 100 pts)
+ * Weights:
+ * - Size: 30 pts
+ * - Shane: 15 pts
+ * - Density: 10 pts
+ * - Color: 20 pts
+ * - Style: 10 pts
+ * - Collection: 5 pts
+ * - Budget: 10 pts
+ * Total = 100 pts
  */
 export function recommendCarpets(
   input: CarpetRecommendationInput,
   products: CarpetProductWithVariants[]
 ): CarpetRecommendationResult[] {
   const results: CarpetRecommendationResult[] = [];
+
+  const hasPreferences = Boolean(
+    (input.preferredSizes && input.preferredSizes.length > 0) ||
+    input.preferredShane ||
+    input.preferredDensity ||
+    (input.preferredColors && input.preferredColors.length > 0) ||
+    input.preferredStyle ||
+    input.preferredCollection ||
+    (input.budgetMax && input.budgetMax > 0)
+  );
 
   for (const product of products) {
     for (const variant of product.variants) {
@@ -67,14 +87,13 @@ export function recommendCarpets(
           score += 30;
           reasons.push(`تطابق دقیق ابعاد انتخابی (${formatCarpetSize(variant.size)})`);
         } else {
-          // Partial size penalty
-          score += 5;
+          score += 5; // partial
         }
       } else {
-        score += 15; // neutral
+        score += 15; // neutral midpoint
       }
 
-      // 2. Shane & Density matching (Weight: 25 pts)
+      // 2. Shane (Weight: 15 pts) & Density (Weight: 10 pts)
       if (input.preferredShane) {
         const shaneNum = parseInt(input.preferredShane, 10);
         if (product.shane === shaneNum) {
@@ -84,15 +103,19 @@ export function recommendCarpets(
           score += 8;
         }
       } else {
-        score += 10;
+        score += 8; // neutral
       }
 
       if (input.preferredDensity) {
         const densityNum = parseInt(input.preferredDensity, 10);
         if (product.density === densityNum) {
           score += 10;
-          reasons.push(`تراکم بافت مطابق نیاز (${toPersianDigits(product.density)})`);
+          reasons.push(`تراکم بافت مطابق سلیقه (${toPersianDigits(product.density)})`);
+        } else if (Math.abs(product.density - densityNum) <= 600) {
+          score += 5;
         }
+      } else {
+        score += 5; // neutral
       }
 
       // 3. Color matching (Weight: 20 pts)
@@ -102,17 +125,20 @@ export function recommendCarpets(
         );
         if (hasColor) {
           score += 20;
-          reasons.push(`همخوانی رنگ زمینه (${product.primaryColor}) با سلیقه مشتری`);
+          reasons.push(`همخوانی رنگ زمینه (${product.primaryColor}) با دکوراسیون مشتری`);
         }
       } else {
-        score += 10;
+        score += 10; // neutral
       }
 
-      // 4. Style & Collection (Weight: 15 pts)
+      // 4. Style (Weight: 10 pts) & Collection (Weight: 5 pts)
       if (input.preferredStyle && product.style === input.preferredStyle) {
         score += 10;
         reasons.push(`سبک بافت ${product.style}`);
+      } else if (!input.preferredStyle) {
+        score += 5;
       }
+
       if (
         input.preferredCollection &&
         (product.collection.includes(input.preferredCollection) ||
@@ -120,6 +146,8 @@ export function recommendCarpets(
       ) {
         score += 5;
         reasons.push(`کلکسیون اصیل ${product.collection}`);
+      } else if (!input.preferredCollection) {
+        score += 2;
       }
 
       // 5. Budget matching (Weight: 10 pts)
@@ -133,41 +161,33 @@ export function recommendCarpets(
           score += 10;
           reasons.push(`قیمت در محدوده بودجه مصوب (${formatToman(effectivePrice)})`);
         } else if (effectivePrice <= input.budgetMax * 1.15) {
-          score += 5; // Close to budget
+          score += 5; // close to budget
           reasons.push(`اختلاف جزئی با بودجه (${formatToman(effectivePrice - input.budgetMax)} اضافه)`);
         }
       } else {
-        score += 8;
-      }
-
-      // 6. Previous purchase affinity bonus (+5 pts)
-      if (
-        input.previousPurchasedCollections &&
-        input.previousPurchasedCollections.includes(product.collection)
-      ) {
-        score += 5;
-        reasons.push(`همخوانی با خریدهای قبلی از کلکسیون ${product.collection}`);
+        score += 5; // neutral
       }
 
       // Stock availability evaluation
       const availableStock = Math.max(0, variant.stock - (variant.reservedStock || 0));
       let stockStatus: "AVAILABLE" | "LOW_STOCK" | "OUT_OF_STOCK" = "OUT_OF_STOCK";
+
       if (availableStock > 2) {
         stockStatus = "AVAILABLE";
         reasons.push(`موجودی آماده تحویل (${toPersianDigits(availableStock)} تخته)`);
       } else if (availableStock > 0) {
         stockStatus = "LOW_STOCK";
-        reasons.push(`موجودی انبار محدود (${toPersianDigits(availableStock)} تخته - اقدام فوری)`);
+        reasons.push(`موجودی محدود انبار (${toPersianDigits(availableStock)} تخته)`);
       } else {
         stockStatus = "OUT_OF_STOCK";
-        // Deduct points if completely out of stock
-        score = Math.max(0, score - 15);
+        // Significant penalty so out-of-stock items never rank above in-stock alternatives
+        score = Math.max(0, score - 25);
       }
 
-      // Cap score between 0 and 100
-      const finalScore = Math.min(100, Math.max(0, score));
+      // Strict normalization 0 - 100
+      const finalScore = Math.min(100, Math.max(0, Math.round(score)));
 
-      if (finalScore >= 35) {
+      if (finalScore >= 30) {
         results.push({
           product,
           matchedVariant: variant,
@@ -175,11 +195,15 @@ export function recommendCarpets(
           matchReasons: reasons,
           stockStatus,
           availableStock,
+          isPersonalized: hasPreferences,
         });
       }
     }
   }
 
-  // Sort descending by match score
-  return results.sort((a, b) => b.matchScore - a.matchScore);
+  // Sort descending: by matchScore, then by availableStock
+  return results.sort((a, b) => {
+    if (b.matchScore !== a.matchScore) return b.matchScore - a.matchScore;
+    return b.availableStock - a.availableStock;
+  });
 }

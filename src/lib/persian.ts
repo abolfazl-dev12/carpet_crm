@@ -112,6 +112,35 @@ export function formatJalaliDate(
 }
 
 /**
+ * Adds Jalali months to a base date accurately based on the Persian Solar Calendar
+ */
+export function addJalaliMonths(baseDate: Date, monthsToAdd: number): Date {
+  const d = new Date(baseDate);
+  const j = jalaali.toJalaali(d.getFullYear(), d.getMonth() + 1, d.getDate());
+  
+  let targetYear = j.jy;
+  let targetMonth = j.jm + monthsToAdd;
+  
+  while (targetMonth > 12) {
+    targetYear += 1;
+    targetMonth -= 12;
+  }
+  while (targetMonth < 1) {
+    targetYear -= 1;
+    targetMonth += 12;
+  }
+
+  // Adjust day if month has fewer days (e.g. Esfand 29/30 or first 6 months with 31 days)
+  const maxDaysInTargetMonth = jalaali.jalaaliMonthLength(targetYear, targetMonth);
+  const targetDay = Math.min(j.jd, maxDaysInTargetMonth);
+
+  const g = jalaali.toGregorian(targetYear, targetMonth, targetDay);
+  const result = new Date(d);
+  result.setFullYear(g.gy, g.gm - 1, g.gd);
+  return result;
+}
+
+/**
  * Returns human-readable Persian relative time (لحظاتی پیش، ۲ ساعت پیش، ۳ روز پیش)
  */
 export function formatPersianRelativeTime(date: Date | string | null | undefined): string {
