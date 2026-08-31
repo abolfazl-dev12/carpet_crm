@@ -249,8 +249,8 @@ export async function PUT(
       session.role === "SALES_REP"
         ? currentCustomer.assignedToId
         : assignedToId !== undefined
-        ? assignedToId
-        : currentCustomer.assignedToId;
+          ? assignedToId
+          : currentCustomer.assignedToId;
 
     const updatedCustomer = await prisma.$transaction(async (tx) => {
       const updated = await tx.customer.update({
@@ -370,13 +370,16 @@ export async function DELETE(
       await tx.deal.deleteMany({ where: { customerId: id } });
       await tx.carpetNeedProfile.deleteMany({ where: { customerId: id } });
       await tx.customer.delete({ where: { id } });
-    });
 
-    await logAuditEvent({
-      userId: session.userId,
-      action: "DELETE",
-      entity: "Customer",
-      entityId: id,
+      await logAuditEvent(
+        {
+          userId: session.userId,
+          action: "DELETE",
+          entity: "Customer",
+          entityId: id,
+        },
+        tx
+      );
     });
 
     return NextResponse.json({ success: true });
