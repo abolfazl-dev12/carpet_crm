@@ -358,24 +358,27 @@ export async function DELETE(req: NextRequest) {
         });
       }
 
+      // Log comprehensive audit event atomically inside the transaction boundary
+      await logAuditEvent(
+        {
+          userId: session.userId,
+          action: "DELETE",
+          entity: "Order",
+          entityId: id,
+          details: {
+            orderNumber: txOrder.orderNumber,
+            finalAmount: txOrder.finalAmount,
+            restoredItemsCount: txOrder.items.length,
+            totalRestoredQuantity: txOrder.items.reduce((sum, it) => sum + it.quantity, 0),
+          },
+        },
+        tx
+      );
+
       // Delete order (cascades unpaid items and empty pending installments)
       await tx.order.delete({
         where: { id },
       });
-    });
-
-    // 3. Log comprehensive audit event
-    await logAuditEvent({
-      userId: session.userId,
-      action: "DELETE",
-      entity: "Order",
-      entityId: id,
-      details: {
-        orderNumber: order.orderNumber,
-        finalAmount: order.finalAmount,
-        restoredItemsCount: order.items.length,
-        totalRestoredQuantity: order.items.reduce((sum, it) => sum + it.quantity, 0),
-      },
     });
 
     return NextResponse.json({

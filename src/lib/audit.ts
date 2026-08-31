@@ -45,13 +45,14 @@ function sanitizeAuditDetails(obj: any): any {
 }
 
 /**
- * Record an audit log entry safely in the database
+ * Record an audit log entry safely in the database (supports optional transaction client)
  */
-export async function logAuditEvent(params: CreateAuditLogParams) {
+export async function logAuditEvent(params: CreateAuditLogParams, tx?: any) {
   try {
+    const client = tx || prisma;
     const cleanDetails = params.details ? sanitizeAuditDetails(params.details) : undefined;
 
-    await prisma.auditLog.create({
+    await client.auditLog.create({
       data: {
         userId: params.userId || undefined,
         action: params.action,
@@ -64,5 +65,9 @@ export async function logAuditEvent(params: CreateAuditLogParams) {
     });
   } catch (error) {
     console.error("Failed to write audit log:", error);
+    if (tx) {
+      // Re-throw in transaction to ensure atomicity
+      throw error;
+    }
   }
 }

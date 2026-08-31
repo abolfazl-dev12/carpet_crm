@@ -1,3 +1,4 @@
+import { NextRequest } from "next/server";
 import prisma from "../src/lib/prisma";
 import {
   toPersianDigits,
@@ -13,9 +14,19 @@ import { calculateTemperature, SCORE_WEIGHTS } from "../src/lib/scoring";
 import { recommendCarpets } from "../src/lib/recommendation";
 import { customerCreateSchema, orderCreateSchema } from "../src/lib/validations/schemas";
 import { evaluateCustomerIntelligence } from "../src/lib/customer-intelligence";
+import { signSessionToken, AUTH_COOKIE_NAME } from "../src/lib/auth";
+
+// Import real API Route Handlers
+import {
+  DELETE as deleteOrderRoute,
+  POST as createOrderRoute,
+  GET as getOrdersRoute,
+} from "../src/app/api/orders/route";
+import { PUT as updateInstallmentRoute } from "../src/app/api/installments/route";
+import { POST as inventoryMovementRoute } from "../src/app/api/inventory/route";
 
 console.log("==================================================");
-console.log("🧪 شروع آزمایش‌های خودکار جامع CRM و پایگاه داده (V3 Real Database Hardening)...");
+console.log("🧪 شروع آزمایش‌های خودکار جامع CRM و پایگاه داده (V2.1 API & DB Level Hardening)...");
 console.log("==================================================");
 
 let passedTests = 0;
@@ -29,6 +40,28 @@ function assert(condition: boolean, testName: string) {
     console.error(`❌ [FAIL] ${testName}`);
     failedTests++;
   }
+}
+
+/**
+ * Helper to construct real NextRequest instances with proper headers & authentication cookies
+ */
+function createApiRequest(
+  url: string,
+  method: string,
+  body?: any,
+  sessionToken?: string
+): NextRequest {
+  const headers: Record<string, string> = {
+    "content-type": "application/json",
+  };
+  if (sessionToken) {
+    headers["cookie"] = `${AUTH_COOKIE_NAME}=${sessionToken}`;
+  }
+  return new NextRequest(new URL(url, "http://localhost:3000"), {
+    method,
+    headers,
+    body: body ? JSON.stringify(body) : undefined,
+  });
 }
 
 async function runAllTests() {
@@ -430,11 +463,13 @@ async function runAllTests() {
   });
   assert(validOrder.success === true, "اعتبارسنجی ساختار استاندارد سفارش");
 
-  // 13. Comprehensive Order Deletion, Stock Restoration & Financial Safety Tests
-  console.log("\n--- ۱۳. آزمون‌های جامع حذف سفارش، بازگردانی موجودی و گارد مالی ---");
+  // 13. Comprehensive Order Deletion, Stock Restoration & Financial Safety Tests (DB Level)
+  console.log("\n--- ۱۳. آزمون‌های سطح پایگاه داده: حذف سفارش و گارد مالی ---");
 
-  // Setup test customer, product, and variant
   const testCustomer = await prisma.customer.findFirst();
+  const testCustomerId = testCustomer?.id || "mock-cust";
+
+  // Create test product and variant
   const testProductForDelete = await prisma.product.create({
     data: {
       code: `PROD-DEL-${Date.now()}`,
@@ -455,7 +490,7 @@ async function runAllTests() {
           areaSquareMeters: 12,
           cashPrice: 30000000,
           installmentPrice: 35000000,
-          stock: 5, // initial stock 5
+          stock: 5,
           soldStock: 0,
         },
       },
@@ -464,212 +499,289 @@ async function runAllTests() {
   });
 
   const delVariant = testProductForDelete.variants[0];
-  const testCustomerId = testCustomer?.id || "mock-cust";
 
-  // Test 13.1 & 13.2: Create Order (stock 5 -> 4), Delete Order -> Restore Stock (4 -> 5) & Movement
-  const orderToDelete = await prisma.$transaction(async (tx) => {
-    const ord = await tx.order.create({
+  // 14. Real API Route Level Integration Tests (Calling Actual Route Handlers)
+  console.log("\n--- ۱۴. آزمون‌های سطح واقعی Route Handler و درخواست‌های HTTP (Real API Integration Tests) ---");
+
+  // Retrieve or create users with different roles for RBAC verification
+  let adminUser = await prisma.user.findFirst({ where: { role: "ADMIN", isActive: true } });
+  if (!adminUser) {
+    adminUser = await prisma.user.create({
       data: {
-        orderNumber: `ORD-DEL-TEST-${Date.now()}`,
-        customerId: testCustomerId,
-        totalAmount: 30000000,
-        finalAmount: 30000000,
-        paidAmount: 0,
-        remainingAmount: 30000000,
-        status: "CONFIRMED",
-        items: {
-          create: {
-            variantId: delVariant.id,
-            quantity: 1,
-            unitPrice: 30000000,
-            totalPrice: 30000000,
-          },
-        },
-      },
-      include: { items: true },
-    });
-
-    await tx.productVariant.update({
-      where: { id: delVariant.id },
-      data: { stock: { decrement: 1 }, soldStock: { increment: 1 } },
-    });
-
-    await tx.inventoryMovement.create({
-      data: {
-        variantId: delVariant.id,
-        type: "SALE",
-        quantity: 1,
-        previousStock: 5,
-        newStock: 4,
-        reason: `فروش تست برای سفارش ${ord.orderNumber}`,
+        name: "مدیر تستی",
+        email: `admin-test-${Date.now()}@carpet.ir`,
+        phone: "09121111111",
+        passwordHash: "hash",
+        role: "ADMIN",
+        isActive: true,
       },
     });
-
-    return ord;
-  });
-
-  const stockAfterSale = await prisma.productVariant.findUnique({ where: { id: delVariant.id } });
-  assert(stockAfterSale?.stock === 4, "موجودی انبار پس از ایجاد سفارش از ۵ به ۴ کاهش یافت");
-
-  // Perform Hard Delete with Restoration logic
-  let restoredMovementId = "";
-  await prisma.$transaction(async (tx) => {
-    const txOrder = await tx.order.findUnique({
-      where: { id: orderToDelete.id },
-      include: { items: true, payments: true, installments: true },
-    });
-
-    if (!txOrder) throw new Error("ORDER_NOT_FOUND");
-    if (txOrder.status === "PAID" || txOrder.payments.length > 0) throw new Error("PAID_ORDER_CANNOT_BE_DELETED");
-
-    for (const item of txOrder.items) {
-      const v = await tx.productVariant.findUnique({ where: { id: item.variantId } });
-      if (!v) throw new Error("VARIANT_NOT_FOUND");
-
-      const prev = v.stock;
-      const next = prev + item.quantity;
-      const nextSold = Math.max(0, v.soldStock - item.quantity);
-
-      const upd = await tx.productVariant.update({
-        where: { id: item.variantId },
-        data: { stock: next, soldStock: nextSold },
-      });
-
-      const m = await tx.inventoryMovement.create({
-        data: {
-          variantId: item.variantId,
-          type: "RETURN",
-          quantity: item.quantity,
-          previousStock: prev,
-          newStock: upd.stock,
-          reason: `برگشت موجودی ناشی از ابطال/حذف سفارش شماره ${txOrder.orderNumber}`,
-        },
-      });
-      restoredMovementId = m.id;
-    }
-
-    await tx.order.delete({ where: { id: orderToDelete.id } });
-  });
-
-  const stockAfterDelete = await prisma.productVariant.findUnique({ where: { id: delVariant.id } });
-  assert(stockAfterDelete?.stock === 5, "موجودی انبار پس از حذف سفارش با موفقیت به ۵ تخته بازگردانده شد");
-
-  const restoredMov = await prisma.inventoryMovement.findUnique({ where: { id: restoredMovementId } });
-  assert(
-    restoredMov?.type === "RETURN" && restoredMov.quantity === 1 && restoredMov.newStock === 5,
-    "ثبت دقیق سند گردش انبار با نوع RETURN و بازگردانی ۱ تخته به انبار"
-  );
-
-  // Test 13.3: Double Delete Protection (Attempting second delete fails, no double restore)
-  let secondDeleteFailed = false;
-  try {
-    await prisma.$transaction(async (tx) => {
-      const txOrder = await tx.order.findUnique({ where: { id: orderToDelete.id } });
-      if (!txOrder) throw new Error("ORDER_NOT_FOUND");
-    });
-  } catch (err: any) {
-    if (err.message === "ORDER_NOT_FOUND") secondDeleteFailed = true;
   }
-  const stockAfterSecondAttempt = await prisma.productVariant.findUnique({ where: { id: delVariant.id } });
-  assert(secondDeleteFailed === true, "تلاش مجدد برای حذف سفارش قبلاً حذف‌شده با خطای ۴۰۴ مواجه شد");
-  assert(stockAfterSecondAttempt?.stock === 5, "موجودی انبار بدون تغییر مضاعف روی ۵ باقی ماند");
 
-  // Test 13.4: Paid Order Hard Delete Blocked
-  const paidOrder = await prisma.order.create({
+  let salesUser = await prisma.user.findFirst({ where: { role: "SALES_REP", isActive: true } });
+  if (!salesUser) {
+    salesUser = await prisma.user.create({
+      data: {
+        name: "کارشناس فروش تستی",
+        email: `rep-test-${Date.now()}@carpet.ir`,
+        phone: "09122222222",
+        passwordHash: "hash",
+        role: "SALES_REP",
+        isActive: true,
+      },
+    });
+  }
+
+  let viewerUser = await prisma.user.findFirst({ where: { role: "VIEWER", isActive: true } });
+  if (!viewerUser) {
+    viewerUser = await prisma.user.create({
+      data: {
+        name: "بیننده تستی",
+        email: `viewer-test-${Date.now()}@carpet.ir`,
+        phone: "09123333333",
+        passwordHash: "hash",
+        role: "VIEWER",
+        isActive: true,
+      },
+    });
+  }
+
+  const adminToken = await signSessionToken({
+    userId: adminUser.id,
+    email: adminUser.email,
+    name: adminUser.name,
+    role: "ADMIN",
+    phone: adminUser.phone,
+  });
+
+  const salesToken = await signSessionToken({
+    userId: salesUser.id,
+    email: salesUser.email,
+    name: salesUser.name,
+    role: "SALES_REP",
+    phone: salesUser.phone,
+  });
+
+  const viewerToken = await signSessionToken({
+    userId: viewerUser.id,
+    email: viewerUser.email,
+    name: viewerUser.name,
+    role: "VIEWER",
+    phone: viewerUser.phone,
+  });
+
+  // Test 14.1: Real DELETE /api/orders Route Call with Admin Token
+  const orderForApiDelete = await prisma.order.create({
     data: {
-      orderNumber: `ORD-PAID-TEST-${Date.now()}`,
+      orderNumber: `ORD-API-DEL-${Date.now()}`,
       customerId: testCustomerId,
+      sellerId: adminUser.id,
       totalAmount: 30000000,
       finalAmount: 30000000,
-      paidAmount: 30000000,
-      remainingAmount: 0,
-      status: "PAID",
-      payments: {
-        create: {
-          idempotencyKey: `PAY-DEL-GUARD-${Date.now()}`,
-          amount: 30000000,
-          method: "POS",
-          status: "CONFIRMED",
-        },
-      },
-    },
-    include: { payments: true },
-  });
-
-  let paidOrderDeleteBlocked = false;
-  if (paidOrder.status === "PAID" || paidOrder.payments.length > 0) {
-    paidOrderDeleteBlocked = true; // Business Guard Enforced
-  }
-  assert(paidOrderDeleteBlocked === true, "گارد امنیتی دیتابیس مانع از حذف فیزیکی سفارش‌های تسویه‌شده شد");
-  const paidOrderStillExists = await prisma.order.findUnique({ where: { id: paidOrder.id } });
-  assert(paidOrderStillExists !== null, "سفارش تسویه‌شده و پرداخت‌های مربوط به آن در دیتابیس حفظ شدند");
-
-  // Test 13.5: Completed Order Hard Delete Blocked
-  const completedOrder = await prisma.order.create({
-    data: {
-      orderNumber: `ORD-COMP-TEST-${Date.now()}`,
-      customerId: testCustomerId,
-      totalAmount: 20000000,
-      finalAmount: 20000000,
-      paidAmount: 20000000,
-      remainingAmount: 0,
-      status: "COMPLETED",
-    },
-  });
-  const isCompletedBlocked = completedOrder.status === "COMPLETED" || completedOrder.paidAmount > 0;
-  assert(isCompletedBlocked === true, "گارد امنیتی مانع از حذف سفارش‌های با وضعیت COMPLETED شد");
-
-  // Test 13.6: Transaction Rollback on Failure during Deletion
-  const orderForRollbackDel = await prisma.order.create({
-    data: {
-      orderNumber: `ORD-RB-DEL-${Date.now()}`,
-      customerId: testCustomerId,
-      totalAmount: 15000000,
-      finalAmount: 15000000,
+      paidAmount: 0,
+      remainingAmount: 30000000,
       status: "CONFIRMED",
       items: {
         create: {
           variantId: delVariant.id,
           quantity: 1,
-          unitPrice: 15000000,
-          totalPrice: 15000000,
+          unitPrice: 30000000,
+          totalPrice: 30000000,
         },
       },
     },
   });
 
-  const stockBeforeFailedDel = (await prisma.productVariant.findUnique({ where: { id: delVariant.id } }))?.stock;
-  let delRollbackCaught = false;
+  // Adjust variant stock to simulate order decrement (5 -> 4)
+  await prisma.productVariant.update({
+    where: { id: delVariant.id },
+    data: { stock: 4, soldStock: 1 },
+  });
 
-  try {
-    await prisma.$transaction(async (tx) => {
-      await tx.productVariant.update({
-        where: { id: delVariant.id },
-        data: { stock: { increment: 1 } },
-      });
+  const deleteReq = createApiRequest(
+    `http://localhost:3000/api/orders?id=${orderForApiDelete.id}`,
+    "DELETE",
+    undefined,
+    adminToken
+  );
 
-      // Deliberate artificial failure before order deletion
-      throw new Error("ARTIFICIAL_FAIL_DURING_DELETE_RESTORE");
-    });
-  } catch (err: any) {
-    if (err.message === "ARTIFICIAL_FAIL_DURING_DELETE_RESTORE") delRollbackCaught = true;
-  }
+  const deleteRes = await deleteOrderRoute(deleteReq);
+  const deleteBody = await deleteRes.json();
 
-  const stockAfterFailedDel = (await prisma.productVariant.findUnique({ where: { id: delVariant.id } }))?.stock;
-  const orderStillExistsAfterFail = await prisma.order.findUnique({ where: { id: orderForRollbackDel.id } });
+  assert(deleteRes.status === 200, `فراخوانی واقعی متد DELETE با وضعیت HTTP 200 (کد واقعی: ${deleteRes.status})`);
+  assert(deleteBody.success === true, "پاسخ موفق JSON از کنترلر واقعی API");
 
-  assert(delRollbackCaught === true, "ایجاد موفق خطای ساختگی حین فرآیند حذف جهت تست Rollback");
-  assert(stockAfterFailedDel === stockBeforeFailedDel, "عدم تغییر موجودی انبار پس از Rollback ترنزکشن حذف");
-  assert(orderStillExistsAfterFail !== null, "سفارش پس از شکست ترنزکشن حذف به طور کامل در دیتابیس باقی ماند");
+  const stockAfterApiDel = await prisma.productVariant.findUnique({ where: { id: delVariant.id } });
+  assert(stockAfterApiDel?.stock === 5, `موجودی انبار پس از اجرای کامل Route به ۵ بازگشت (موجودی واقعی: ${stockAfterApiDel?.stock})`);
 
-  // Test 13.7: Unauthorized Delete / RBAC Enforcement
-  const salesRepRole: string = "SALES_REP";
-  const isUnauthorizedBlocked = salesRepRole !== "ADMIN" && salesRepRole !== "SALES_MANAGER";
-  assert(isUnauthorizedBlocked === true, "مسدودسازی تلاش کارشناس فروش (SALES_REP) برای حذف سفارش با خطای ۴۰۳");
+  const returnMovement = await prisma.inventoryMovement.findFirst({
+    where: {
+      variantId: delVariant.id,
+      type: "RETURN",
+    },
+    orderBy: { createdAt: "desc" },
+  });
+  assert(
+    returnMovement?.quantity === 1 && returnMovement.newStock === 5,
+    "ثبت خودکار سند گردش انبار با نوع RETURN از درون Route Handler واقعی"
+  );
 
-  // Clean up test records
+  const auditLogEntry = await prisma.auditLog.findFirst({
+    where: { entity: "Order", entityId: orderForApiDelete.id, action: "DELETE" },
+  });
+  assert(auditLogEntry !== null, "ثبت لاگ امنیتی AuditLog به صورت اتمیک در زمان حذف سفارش از طریق API");
+
+  // Test 14.2: Double Delete Protection via Real API
+  const secondDeleteReq = createApiRequest(
+    `http://localhost:3000/api/orders?id=${orderForApiDelete.id}`,
+    "DELETE",
+    undefined,
+    adminToken
+  );
+  const secondDeleteRes = await deleteOrderRoute(secondDeleteReq);
+  assert(secondDeleteRes.status === 404, `درخواست دوم حذف سفارش با خطای HTTP 404 مواجه شد (کد واقعی: ${secondDeleteRes.status})`);
+
+  const stockAfterSecondApiAttempt = await prisma.productVariant.findUnique({ where: { id: delVariant.id } });
+  assert(stockAfterSecondApiAttempt?.stock === 5, "موجودی انبار در برابر تلاش مجدد حذف مضاعف ثابت ماند (۵ تخته)");
+
+  // Test 14.3: Paid Order Deletion Blocked via Real API
+  const paidOrderForApi = await prisma.order.create({
+    data: {
+      orderNumber: `ORD-PAID-API-${Date.now()}`,
+      customerId: testCustomerId,
+      totalAmount: 40000000,
+      finalAmount: 40000000,
+      paidAmount: 40000000,
+      remainingAmount: 0,
+      status: "PAID",
+      payments: {
+        create: {
+          idempotencyKey: `PAY-API-GUARD-${Date.now()}`,
+          amount: 40000000,
+          method: "POS",
+          status: "CONFIRMED",
+        },
+      },
+    },
+  });
+
+  const paidDeleteReq = createApiRequest(
+    `http://localhost:3000/api/orders?id=${paidOrderForApi.id}`,
+    "DELETE",
+    undefined,
+    adminToken
+  );
+  const paidDeleteRes = await deleteOrderRoute(paidDeleteReq);
+  const paidDeleteBody = await paidDeleteRes.json();
+
+  assert(paidDeleteRes.status === 400, `مسدودسازی حذف سفارش تسویه‌شده از طریق Route Handler با خطای HTTP 400 (کد واقعی: ${paidDeleteRes.status})`);
+  assert(paidDeleteBody.error.includes("تسویه‌شده") || paidDeleteBody.error.includes("پرداخت"), `پیام خطای فارسی محافظتی: ${paidDeleteBody.error}`);
+
+  // Test 14.4: Completed Order Deletion Blocked via Real API
+  const completedOrderForApi = await prisma.order.create({
+    data: {
+      orderNumber: `ORD-COMP-API-${Date.now()}`,
+      customerId: testCustomerId,
+      totalAmount: 25000000,
+      finalAmount: 25000000,
+      paidAmount: 25000000,
+      remainingAmount: 0,
+      status: "COMPLETED",
+    },
+  });
+
+  const compDeleteReq = createApiRequest(
+    `http://localhost:3000/api/orders?id=${completedOrderForApi.id}`,
+    "DELETE",
+    undefined,
+    adminToken
+  );
+  const compDeleteRes = await deleteOrderRoute(compDeleteReq);
+  assert(compDeleteRes.status === 400, "مسدودسازی حذف سفارش‌های نهایی COMPLETED با خطای HTTP 400");
+
+  // Test 14.5: Unauthorized Request (No Session Cookie)
+  const unauthReq = createApiRequest(
+    `http://localhost:3000/api/orders?id=${completedOrderForApi.id}`,
+    "DELETE"
+  );
+  const unauthRes = await deleteOrderRoute(unauthReq);
+  assert(unauthRes.status === 401, `رد درخواست بدون سشن لاگین با خطای HTTP 401 (کد واقعی: ${unauthRes.status})`);
+
+  // Test 14.6: RBAC Forbidden - Sales Rep cannot delete orders
+  const salesDeleteReq = createApiRequest(
+    `http://localhost:3000/api/orders?id=${completedOrderForApi.id}`,
+    "DELETE",
+    undefined,
+    salesToken
+  );
+  const salesDeleteRes = await deleteOrderRoute(salesDeleteReq);
+  assert(salesDeleteRes.status === 403, `رد درخواست حذف سفارش توسط SALES_REP با خطای HTTP 403 (کد واقعی: ${salesDeleteRes.status})`);
+
+  // Test 14.7: RBAC Forbidden - Viewer cannot delete orders
+  const viewerDeleteReq = createApiRequest(
+    `http://localhost:3000/api/orders?id=${completedOrderForApi.id}`,
+    "DELETE",
+    undefined,
+    viewerToken
+  );
+  const viewerDeleteRes = await deleteOrderRoute(viewerDeleteReq);
+  assert(viewerDeleteRes.status === 403, `رد درخواست حذف سفارش توسط VIEWER با خطای HTTP 403 (کد واقعی: ${viewerDeleteRes.status})`);
+
+  // Test 14.8: Concurrent DELETE calls through Real API Handler
+  const orderForConcApiDel = await prisma.order.create({
+    data: {
+      orderNumber: `ORD-CONC-API-${Date.now()}`,
+      customerId: testCustomerId,
+      totalAmount: 10000000,
+      finalAmount: 10000000,
+      paidAmount: 0,
+      remainingAmount: 10000000,
+      status: "CONFIRMED",
+      items: {
+        create: {
+          variantId: delVariant.id,
+          quantity: 1,
+          unitPrice: 10000000,
+          totalPrice: 10000000,
+        },
+      },
+    },
+  });
+
+  // Set initial stock to 4 for this item
+  await prisma.productVariant.update({
+    where: { id: delVariant.id },
+    data: { stock: 4, soldStock: 1 },
+  });
+
+  const concReq1 = createApiRequest(
+    `http://localhost:3000/api/orders?id=${orderForConcApiDel.id}`,
+    "DELETE",
+    undefined,
+    adminToken
+  );
+  const concReq2 = createApiRequest(
+    `http://localhost:3000/api/orders?id=${orderForConcApiDel.id}`,
+    "DELETE",
+    undefined,
+    adminToken
+  );
+
+  const [concRes1, concRes2] = await Promise.all([
+    deleteOrderRoute(concReq1),
+    deleteOrderRoute(concReq2),
+  ]);
+
+  const statuses = [concRes1.status, concRes2.status];
+  assert(statuses.includes(200), "درخواست همزمان: یک درخواست با موفقیت HTTP 200 سفارش را حذف کرد");
+  assert(statuses.includes(404), "درخواست همزمان: درخواست دوم با خطای HTTP 404 رد شد");
+
+  const stockAfterConcApi = await prisma.productVariant.findUnique({ where: { id: delVariant.id } });
+  assert(stockAfterConcApi?.stock === 5, `موجودی نهایی انبار دقیقاً ۱ بار بازگردانی شد و به ۵ رسید (موجودی: ${stockAfterConcApi?.stock})`);
+
+  // Clean up all temporary test orders & product
   await prisma.order.deleteMany({
-    where: { id: { in: [paidOrder.id, completedOrder.id, orderForRollbackDel.id] } },
+    where: { id: { in: [paidOrderForApi.id, completedOrderForApi.id] } },
   });
   await prisma.product.delete({ where: { id: testProductForDelete.id } });
 
@@ -680,7 +792,7 @@ async function runAllTests() {
   if (failedTests > 0) {
     process.exit(1);
   } else {
-    console.log("🎉 تمامی آزمون‌های واقعی پایگاه داده، قیدهای یکتایی P2002، انبارداری، همزمانی، حذف سفارش، بازگردانی موجودی و تراز مالی با موفقیت پاس شدند!");
+    console.log("🎉 تمامی آزمون‌های واقعی پایگاه داده، Route Handlerهای واقعی API، احراز هویت، RBAC، قیدهای یکتایی P2002، انبارداری و تراز مالی با موفقیت پاس شدند!");
     process.exit(0);
   }
 }
