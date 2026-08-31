@@ -252,7 +252,11 @@ export async function POST(req: NextRequest) {
 export async function DELETE(req: NextRequest) {
   try {
     const session = await getSessionFromRequest(req);
-    if (!session || (session.role !== "ADMIN" && session.role !== "SALES_MANAGER")) {
+    if (!session) {
+      return NextResponse.json({ error: "عدم احراز هویت" }, { status: 401 });
+    }
+
+    if (session.role !== "ADMIN" && session.role !== "SALES_MANAGER") {
       return NextResponse.json({ error: "عدم دسترسی کافی برای حذف سفارش" }, { status: 403 });
     }
 
@@ -263,20 +267,136 @@ export async function DELETE(req: NextRequest) {
       return NextResponse.json({ error: "شناسه سفارش الزامی است." }, { status: 400 });
     }
 
-    await prisma.order.delete({
+    // 1. Initial lookup to check existence and financial invariants
+    const order = await prisma.order.findUnique({
       where: { id },
+      include: {
+        items: { include: { variant: true } },
+        payments: true,
+        installments: true,
+      },
     });
 
+    if (!order) {
+      return NextResponse.json({ error: "سفارش مورد نظر یافت نشد." }, { status: 404 });
+    }
+
+    // Guard: Prevent deletion of paid, completed, or orders with confirmed payments / paid installments
+    const hasConfirmedPayments = order.payments.length > 0;
+    const hasPaidInstallments = order.installments.some((inst) => inst.status === "PAID");
+    const isSettledStatus = order.status === "PAID" || order.status === "COMPLETED" || order.paidAmount > 0;
+
+    if (hasConfirmedPayments || hasPaidInstallments || isSettledStatus) {
+      return NextResponse.json(
+        {
+          error:
+            "سفارش‌های تسویه‌شده یا دارای تراکنش پرداخت معتبر قابل حذف فیزیکی نیستند. لطفاً در صورت نیاز وضعیت سفارش را تغییر داده یا از فرآیند ابطال استفاده فرمایید.",
+        },
+        { status: 400 }
+      );
+    }
+
+    // 2. Atomic transaction: Restore inventory stock, log RETURN movement, and delete order
+    await prisma.$transaction(async (tx) => {
+      // Re-verify order inside transaction boundary
+      const txOrder = await tx.order.findUnique({
+        where: { id },
+        include: {
+          items: true,
+          payments: true,
+          installments: true,
+        },
+      });
+
+      if (!txOrder) {
+        throw new Error("ORDER_NOT_FOUND");
+      }
+
+      if (
+        txOrder.status === "PAID" ||
+        txOrder.status === "COMPLETED" ||
+        txOrder.paidAmount > 0 ||
+        txOrder.payments.length > 0 ||
+        txOrder.installments.some((inst) => inst.status === "PAID")
+      ) {
+        throw new Error("PAID_ORDER_CANNOT_BE_DELETED");
+      }
+
+      // Restore inventory for each item
+      for (const item of txOrder.items) {
+        const variant = await tx.productVariant.findUnique({
+          where: { id: item.variantId },
+        });
+
+        if (!variant) {
+          throw new Error(`کالای انبار با شناسه ${item.variantId} یافت نشد.`);
+        }
+
+        const restoredQty = item.quantity;
+        const previousStock = variant.stock;
+        const newStock = previousStock + restoredQty;
+        const newSoldStock = Math.max(0, variant.soldStock - restoredQty);
+
+        const updatedVariant = await tx.productVariant.update({
+          where: { id: item.variantId },
+          data: {
+            stock: newStock,
+            soldStock: newSoldStock,
+          },
+        });
+
+        await tx.inventoryMovement.create({
+          data: {
+            variantId: item.variantId,
+            type: "RETURN",
+            quantity: restoredQty,
+            previousStock: previousStock,
+            newStock: updatedVariant.stock,
+            reason: `برگشت موجودی ناشی از ابطال/حذف سفارش شماره ${txOrder.orderNumber}`,
+            userId: session.userId,
+          },
+        });
+      }
+
+      // Delete order (cascades unpaid items and empty pending installments)
+      await tx.order.delete({
+        where: { id },
+      });
+    });
+
+    // 3. Log comprehensive audit event
     await logAuditEvent({
       userId: session.userId,
       action: "DELETE",
       entity: "Order",
       entityId: id,
+      details: {
+        orderNumber: order.orderNumber,
+        finalAmount: order.finalAmount,
+        restoredItemsCount: order.items.length,
+        totalRestoredQuantity: order.items.reduce((sum, it) => sum + it.quantity, 0),
+      },
     });
 
-    return NextResponse.json({ success: true });
+    return NextResponse.json({
+      success: true,
+      message: "سفارش با موفقیت حذف و موجودی اقلام به انبار بازگردانده شد.",
+    });
   } catch (error: any) {
     console.error("Error deleting order:", error);
-    return NextResponse.json({ error: "خطا در حذف سفارش" }, { status: 500 });
+    if (error?.message === "ORDER_NOT_FOUND") {
+      return NextResponse.json({ error: "سفارش مورد نظر یافت نشد." }, { status: 404 });
+    }
+    if (error?.message === "PAID_ORDER_CANNOT_BE_DELETED") {
+      return NextResponse.json(
+        {
+          error:
+            "سفارش‌های تسویه‌شده یا دارای تراکنش پرداخت معتبر قابل حذف فیزیکی نیستند. لطفاً در صورت نیاز وضعیت سفارش را تغییر داده یا از فرآیند ابطال استفاده فرمایید.",
+        },
+        { status: 400 }
+      );
+    }
+    return NextResponse.json({ error: "خطا در حذف سفارش و بازگردانی انبار" }, { status: 500 });
   }
 }
+

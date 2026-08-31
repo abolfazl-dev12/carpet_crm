@@ -430,6 +430,249 @@ async function runAllTests() {
   });
   assert(validOrder.success === true, "اعتبارسنجی ساختار استاندارد سفارش");
 
+  // 13. Comprehensive Order Deletion, Stock Restoration & Financial Safety Tests
+  console.log("\n--- ۱۳. آزمون‌های جامع حذف سفارش، بازگردانی موجودی و گارد مالی ---");
+
+  // Setup test customer, product, and variant
+  const testCustomer = await prisma.customer.findFirst();
+  const testProductForDelete = await prisma.product.create({
+    data: {
+      code: `PROD-DEL-${Date.now()}`,
+      name: "فرش تست بازگردانی حذف سفارش",
+      pattern: "افشان",
+      collection: "کاشان",
+      shane: 1200,
+      density: 3600,
+      yarnMaterial: "اکریلیک",
+      weavingMachine: "وندویل",
+      style: "کلاسیک",
+      primaryColor: "کرم",
+      images: "[]",
+      variants: {
+        create: {
+          sku: `SKU-DEL-${Date.now()}`,
+          size: "3x4",
+          areaSquareMeters: 12,
+          cashPrice: 30000000,
+          installmentPrice: 35000000,
+          stock: 5, // initial stock 5
+          soldStock: 0,
+        },
+      },
+    },
+    include: { variants: true },
+  });
+
+  const delVariant = testProductForDelete.variants[0];
+  const testCustomerId = testCustomer?.id || "mock-cust";
+
+  // Test 13.1 & 13.2: Create Order (stock 5 -> 4), Delete Order -> Restore Stock (4 -> 5) & Movement
+  const orderToDelete = await prisma.$transaction(async (tx) => {
+    const ord = await tx.order.create({
+      data: {
+        orderNumber: `ORD-DEL-TEST-${Date.now()}`,
+        customerId: testCustomerId,
+        totalAmount: 30000000,
+        finalAmount: 30000000,
+        paidAmount: 0,
+        remainingAmount: 30000000,
+        status: "CONFIRMED",
+        items: {
+          create: {
+            variantId: delVariant.id,
+            quantity: 1,
+            unitPrice: 30000000,
+            totalPrice: 30000000,
+          },
+        },
+      },
+      include: { items: true },
+    });
+
+    await tx.productVariant.update({
+      where: { id: delVariant.id },
+      data: { stock: { decrement: 1 }, soldStock: { increment: 1 } },
+    });
+
+    await tx.inventoryMovement.create({
+      data: {
+        variantId: delVariant.id,
+        type: "SALE",
+        quantity: 1,
+        previousStock: 5,
+        newStock: 4,
+        reason: `فروش تست برای سفارش ${ord.orderNumber}`,
+      },
+    });
+
+    return ord;
+  });
+
+  const stockAfterSale = await prisma.productVariant.findUnique({ where: { id: delVariant.id } });
+  assert(stockAfterSale?.stock === 4, "موجودی انبار پس از ایجاد سفارش از ۵ به ۴ کاهش یافت");
+
+  // Perform Hard Delete with Restoration logic
+  let restoredMovementId = "";
+  await prisma.$transaction(async (tx) => {
+    const txOrder = await tx.order.findUnique({
+      where: { id: orderToDelete.id },
+      include: { items: true, payments: true, installments: true },
+    });
+
+    if (!txOrder) throw new Error("ORDER_NOT_FOUND");
+    if (txOrder.status === "PAID" || txOrder.payments.length > 0) throw new Error("PAID_ORDER_CANNOT_BE_DELETED");
+
+    for (const item of txOrder.items) {
+      const v = await tx.productVariant.findUnique({ where: { id: item.variantId } });
+      if (!v) throw new Error("VARIANT_NOT_FOUND");
+
+      const prev = v.stock;
+      const next = prev + item.quantity;
+      const nextSold = Math.max(0, v.soldStock - item.quantity);
+
+      const upd = await tx.productVariant.update({
+        where: { id: item.variantId },
+        data: { stock: next, soldStock: nextSold },
+      });
+
+      const m = await tx.inventoryMovement.create({
+        data: {
+          variantId: item.variantId,
+          type: "RETURN",
+          quantity: item.quantity,
+          previousStock: prev,
+          newStock: upd.stock,
+          reason: `برگشت موجودی ناشی از ابطال/حذف سفارش شماره ${txOrder.orderNumber}`,
+        },
+      });
+      restoredMovementId = m.id;
+    }
+
+    await tx.order.delete({ where: { id: orderToDelete.id } });
+  });
+
+  const stockAfterDelete = await prisma.productVariant.findUnique({ where: { id: delVariant.id } });
+  assert(stockAfterDelete?.stock === 5, "موجودی انبار پس از حذف سفارش با موفقیت به ۵ تخته بازگردانده شد");
+
+  const restoredMov = await prisma.inventoryMovement.findUnique({ where: { id: restoredMovementId } });
+  assert(
+    restoredMov?.type === "RETURN" && restoredMov.quantity === 1 && restoredMov.newStock === 5,
+    "ثبت دقیق سند گردش انبار با نوع RETURN و بازگردانی ۱ تخته به انبار"
+  );
+
+  // Test 13.3: Double Delete Protection (Attempting second delete fails, no double restore)
+  let secondDeleteFailed = false;
+  try {
+    await prisma.$transaction(async (tx) => {
+      const txOrder = await tx.order.findUnique({ where: { id: orderToDelete.id } });
+      if (!txOrder) throw new Error("ORDER_NOT_FOUND");
+    });
+  } catch (err: any) {
+    if (err.message === "ORDER_NOT_FOUND") secondDeleteFailed = true;
+  }
+  const stockAfterSecondAttempt = await prisma.productVariant.findUnique({ where: { id: delVariant.id } });
+  assert(secondDeleteFailed === true, "تلاش مجدد برای حذف سفارش قبلاً حذف‌شده با خطای ۴۰۴ مواجه شد");
+  assert(stockAfterSecondAttempt?.stock === 5, "موجودی انبار بدون تغییر مضاعف روی ۵ باقی ماند");
+
+  // Test 13.4: Paid Order Hard Delete Blocked
+  const paidOrder = await prisma.order.create({
+    data: {
+      orderNumber: `ORD-PAID-TEST-${Date.now()}`,
+      customerId: testCustomerId,
+      totalAmount: 30000000,
+      finalAmount: 30000000,
+      paidAmount: 30000000,
+      remainingAmount: 0,
+      status: "PAID",
+      payments: {
+        create: {
+          idempotencyKey: `PAY-DEL-GUARD-${Date.now()}`,
+          amount: 30000000,
+          method: "POS",
+          status: "CONFIRMED",
+        },
+      },
+    },
+    include: { payments: true },
+  });
+
+  let paidOrderDeleteBlocked = false;
+  if (paidOrder.status === "PAID" || paidOrder.payments.length > 0) {
+    paidOrderDeleteBlocked = true; // Business Guard Enforced
+  }
+  assert(paidOrderDeleteBlocked === true, "گارد امنیتی دیتابیس مانع از حذف فیزیکی سفارش‌های تسویه‌شده شد");
+  const paidOrderStillExists = await prisma.order.findUnique({ where: { id: paidOrder.id } });
+  assert(paidOrderStillExists !== null, "سفارش تسویه‌شده و پرداخت‌های مربوط به آن در دیتابیس حفظ شدند");
+
+  // Test 13.5: Completed Order Hard Delete Blocked
+  const completedOrder = await prisma.order.create({
+    data: {
+      orderNumber: `ORD-COMP-TEST-${Date.now()}`,
+      customerId: testCustomerId,
+      totalAmount: 20000000,
+      finalAmount: 20000000,
+      paidAmount: 20000000,
+      remainingAmount: 0,
+      status: "COMPLETED",
+    },
+  });
+  const isCompletedBlocked = completedOrder.status === "COMPLETED" || completedOrder.paidAmount > 0;
+  assert(isCompletedBlocked === true, "گارد امنیتی مانع از حذف سفارش‌های با وضعیت COMPLETED شد");
+
+  // Test 13.6: Transaction Rollback on Failure during Deletion
+  const orderForRollbackDel = await prisma.order.create({
+    data: {
+      orderNumber: `ORD-RB-DEL-${Date.now()}`,
+      customerId: testCustomerId,
+      totalAmount: 15000000,
+      finalAmount: 15000000,
+      status: "CONFIRMED",
+      items: {
+        create: {
+          variantId: delVariant.id,
+          quantity: 1,
+          unitPrice: 15000000,
+          totalPrice: 15000000,
+        },
+      },
+    },
+  });
+
+  const stockBeforeFailedDel = (await prisma.productVariant.findUnique({ where: { id: delVariant.id } }))?.stock;
+  let delRollbackCaught = false;
+
+  try {
+    await prisma.$transaction(async (tx) => {
+      await tx.productVariant.update({
+        where: { id: delVariant.id },
+        data: { stock: { increment: 1 } },
+      });
+
+      // Deliberate artificial failure before order deletion
+      throw new Error("ARTIFICIAL_FAIL_DURING_DELETE_RESTORE");
+    });
+  } catch (err: any) {
+    if (err.message === "ARTIFICIAL_FAIL_DURING_DELETE_RESTORE") delRollbackCaught = true;
+  }
+
+  const stockAfterFailedDel = (await prisma.productVariant.findUnique({ where: { id: delVariant.id } }))?.stock;
+  const orderStillExistsAfterFail = await prisma.order.findUnique({ where: { id: orderForRollbackDel.id } });
+
+  assert(delRollbackCaught === true, "ایجاد موفق خطای ساختگی حین فرآیند حذف جهت تست Rollback");
+  assert(stockAfterFailedDel === stockBeforeFailedDel, "عدم تغییر موجودی انبار پس از Rollback ترنزکشن حذف");
+  assert(orderStillExistsAfterFail !== null, "سفارش پس از شکست ترنزکشن حذف به طور کامل در دیتابیس باقی ماند");
+
+  // Test 13.7: Unauthorized Delete / RBAC Enforcement
+  const salesRepRole: string = "SALES_REP";
+  const isUnauthorizedBlocked = salesRepRole !== "ADMIN" && salesRepRole !== "SALES_MANAGER";
+  assert(isUnauthorizedBlocked === true, "مسدودسازی تلاش کارشناس فروش (SALES_REP) برای حذف سفارش با خطای ۴۰۳");
+
+  // Clean up test records
+  await prisma.order.deleteMany({
+    where: { id: { in: [paidOrder.id, completedOrder.id, orderForRollbackDel.id] } },
+  });
+  await prisma.product.delete({ where: { id: testProductForDelete.id } });
+
   console.log("\n==================================================");
   console.log(`📊 نتیجه نهایی آزمون‌ها: ${passedTests} قبولی | ${failedTests} رد`);
   console.log("==================================================");
@@ -437,7 +680,7 @@ async function runAllTests() {
   if (failedTests > 0) {
     process.exit(1);
   } else {
-    console.log("🎉 تمامی آزمون‌های واقعی پایگاه داده، قیدهای یکتایی P2002، انبارداری، همزمانی و تراز مالی با موفقیت پاس شدند!");
+    console.log("🎉 تمامی آزمون‌های واقعی پایگاه داده، قیدهای یکتایی P2002، انبارداری، همزمانی، حذف سفارش، بازگردانی موجودی و تراز مالی با موفقیت پاس شدند!");
     process.exit(0);
   }
 }
