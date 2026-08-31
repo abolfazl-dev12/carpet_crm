@@ -290,7 +290,7 @@ export async function DELETE(req: NextRequest) {
       return NextResponse.json(
         {
           error:
-            "سفارش‌های تسویه‌شده یا دارای تراکنش پرداخت معتبر قابل حذف فیزیکی نیستند. لطفاً در صورت نیاز وضعیت سفارش را تغییر داده یا از فرآیند ابطال استفاده فرمایید.",
+            "این سفارش دارای سوابق مالی است و امکان حذف مستقیم آن وجود ندارد. ابتدا سفارش را لغو یا اصلاح کنید.",
         },
         { status: 400 }
       );
@@ -352,7 +352,7 @@ export async function DELETE(req: NextRequest) {
             quantity: restoredQty,
             previousStock: previousStock,
             newStock: updatedVariant.stock,
-            reason: `برگشت موجودی ناشی از ابطال/حذف سفارش شماره ${txOrder.orderNumber}`,
+            reason: `برگشت موجودی به دلیل ابطال/حذف سفارش شماره ${txOrder.orderNumber}`,
             userId: session.userId,
           },
         });
@@ -394,7 +394,7 @@ export async function DELETE(req: NextRequest) {
       return NextResponse.json(
         {
           error:
-            "سفارش‌های تسویه‌شده یا دارای تراکنش پرداخت معتبر قابل حذف فیزیکی نیستند. لطفاً در صورت نیاز وضعیت سفارش را تغییر داده یا از فرآیند ابطال استفاده فرمایید.",
+            "این سفارش دارای سوابق مالی است و امکان حذف مستقیم آن وجود ندارد. ابتدا سفارش را لغو یا اصلاح کنید.",
         },
         { status: 400 }
       );

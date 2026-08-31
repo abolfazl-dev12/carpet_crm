@@ -675,7 +675,7 @@ async function runAllTests() {
   const paidDeleteBody = await paidDeleteRes.json();
 
   assert(paidDeleteRes.status === 400, `مسدودسازی حذف سفارش تسویه‌شده از طریق Route Handler با خطای HTTP 400 (کد واقعی: ${paidDeleteRes.status})`);
-  assert(paidDeleteBody.error.includes("تسویه‌شده") || paidDeleteBody.error.includes("پرداخت"), `پیام خطای فارسی محافظتی: ${paidDeleteBody.error}`);
+  assert(paidDeleteBody.error.includes("سوابق مالی") || paidDeleteBody.error.includes("لغو"), `پیام خطای فارسی محافظتی: ${paidDeleteBody.error}`);
 
   // Test 14.4: Completed Order Deletion Blocked via Real API
   const completedOrderForApi = await prisma.order.create({
