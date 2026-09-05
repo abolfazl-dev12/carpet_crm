@@ -1,11 +1,22 @@
 import { NextRequest, NextResponse } from "next/server";
+import type { Prisma } from "@prisma/client";
 import prisma from "@/lib/prisma";
 import { getSessionFromRequest } from "@/lib/auth";
+import {
+  ADMIN_ROLES,
+  hasAllowedRole,
+  MANAGEMENT_ROLES,
+} from "@/lib/authorization";
 import { logAuditEvent } from "@/lib/audit";
 import { productCreateSchema, productUpdateSchema } from "@/lib/validations/schemas";
 
 export async function GET(req: NextRequest) {
   try {
+    const session = await getSessionFromRequest(req);
+    if (!session) {
+      return NextResponse.json({ error: "عدم احراز هویت" }, { status: 401 });
+    }
+
     const { searchParams } = new URL(req.url);
     const search = searchParams.get("search")?.trim() || "";
     const collection = searchParams.get("collection")?.trim() || "";
@@ -13,7 +24,7 @@ export async function GET(req: NextRequest) {
     const style = searchParams.get("style")?.trim() || "";
     const primaryColor = searchParams.get("primaryColor")?.trim() || "";
 
-    const whereClause: any = { isActive: true };
+    const whereClause: Prisma.ProductWhereInput = { isActive: true };
 
     if (collection) whereClause.collection = { contains: collection };
     if (shane) whereClause.shane = parseInt(shane, 10);
@@ -33,6 +44,7 @@ export async function GET(req: NextRequest) {
       where: whereClause,
       include: {
         variants: {
+          where: { isActive: true },
           orderBy: { areaSquareMeters: "desc" },
         },
       },
@@ -49,7 +61,8 @@ export async function GET(req: NextRequest) {
 export async function POST(req: NextRequest) {
   try {
     const session = await getSessionFromRequest(req);
-    if (!session || (session.role !== "ADMIN" && session.role !== "SALES_MANAGER")) {
+    if (!session) return NextResponse.json({ error: "عدم احراز هویت" }, { status: 401 });
+    if (!hasAllowedRole(session, MANAGEMENT_ROLES)) {
       return NextResponse.json({ error: "عدم دسترسی کافی برای ایجاد محصول" }, { status: 403 });
     }
 
@@ -102,7 +115,7 @@ export async function POST(req: NextRequest) {
         weavingMachine: weavingMachine || "وندویل بلژیک",
         style: style || "کلاسیک",
         primaryColor: primaryColor || "سرمه‌ای",
-        images: JSON.stringify(images || []),
+        images: images || [],
         description: description || null,
         variants: {
           create: defaultVariants.map((v) => ({
@@ -138,7 +151,8 @@ export async function POST(req: NextRequest) {
 export async function PUT(req: NextRequest) {
   try {
     const session = await getSessionFromRequest(req);
-    if (!session || (session.role !== "ADMIN" && session.role !== "SALES_MANAGER")) {
+    if (!session) return NextResponse.json({ error: "عدم احراز هویت" }, { status: 401 });
+    if (!hasAllowedRole(session, MANAGEMENT_ROLES)) {
       return NextResponse.json({ error: "عدم دسترسی کافی برای ویرایش محصول" }, { status: 403 });
     }
 
@@ -203,7 +217,8 @@ export async function PUT(req: NextRequest) {
 export async function DELETE(req: NextRequest) {
   try {
     const session = await getSessionFromRequest(req);
-    if (!session || session.role !== "ADMIN") {
+    if (!session) return NextResponse.json({ error: "عدم احراز هویت" }, { status: 401 });
+    if (!hasAllowedRole(session, ADMIN_ROLES)) {
       return NextResponse.json({ error: "فقط مدیر ارشد مجاز به حذف فرش از سیستم است." }, { status: 403 });
     }
 

@@ -1,11 +1,13 @@
 import { NextRequest, NextResponse } from "next/server";
 import prisma from "@/lib/prisma";
 import { getSessionFromRequest } from "@/lib/auth";
+import { hasAllowedRole, MANAGEMENT_ROLES } from "@/lib/authorization";
 
 export async function GET(req: NextRequest) {
   try {
     const session = await getSessionFromRequest(req);
-    if (!session || (session.role !== "ADMIN" && session.role !== "SALES_MANAGER")) {
+    if (!session) return NextResponse.json({ error: "عدم احراز هویت" }, { status: 401 });
+    if (!hasAllowedRole(session, MANAGEMENT_ROLES)) {
       return NextResponse.json({ error: "عدم دسترسی به گزارش‌های مدیریتی" }, { status: 403 });
     }
 

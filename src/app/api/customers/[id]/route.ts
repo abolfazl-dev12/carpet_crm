@@ -1,9 +1,22 @@
 import { NextRequest, NextResponse } from "next/server";
 import prisma from "@/lib/prisma";
+import { PUBLIC_USER_SELECT } from "@/lib/public-user";
 import { getSessionFromRequest } from "@/lib/auth";
+import {
+  canAccessOwners,
+  canMutateCrm,
+  getCustomerScope,
+  getDealScope,
+  getFollowUpScope,
+  getLeadScope,
+  getOrderScope,
+  hasAllowedRole,
+  MANAGEMENT_ROLES,
+} from "@/lib/authorization";
 import { logAuditEvent } from "@/lib/audit";
 import { customerUpdateSchema } from "@/lib/validations/schemas";
 import { normalizeIranianPhone, isValidIranianMobile } from "@/lib/persian";
+import { readStringArray } from "@/lib/json-fields";
 import { evaluateCustomerIntelligence } from "@/lib/customer-intelligence";
 import { recommendCarpets } from "@/lib/recommendation";
 
@@ -22,10 +35,12 @@ export async function GET(
         needProfiles: true,
         assignedTo: { select: { id: true, name: true, phone: true, avatar: true } },
         deals: {
+          where: getDealScope(session),
           include: { product: true, variant: true },
           orderBy: { createdAt: "desc" },
         },
         orders: {
+          where: getOrderScope(session),
           include: {
             items: { include: { variant: { include: { product: true } } } },
             payments: { orderBy: { paidAt: "desc" } },
@@ -34,10 +49,12 @@ export async function GET(
           orderBy: { createdAt: "desc" },
         },
         followUps: {
+          where: getFollowUpScope(session),
           include: { assignedTo: { select: { name: true } } },
           orderBy: { scheduledAt: "desc" },
         },
         leads: {
+          where: getLeadScope(session),
           orderBy: { createdAt: "desc" },
         },
       },
@@ -46,7 +63,7 @@ export async function GET(
     if (!customer) return NextResponse.json({ error: "مشتری یافت نشد" }, { status: 404 });
 
     // Server-side RBAC: Sales Reps can only view their own assigned customers
-    if (session.role === "SALES_REP" && customer.assignedToId !== session.userId) {
+    if (!canAccessOwners(session, [customer.assignedToId])) {
       return NextResponse.json({ error: "عدم دسترسی به این پرونده مشتری" }, { status: 403 });
     }
 
@@ -56,15 +73,15 @@ export async function GET(
     // 2. Fetch Active Products Catalog for Real Carpet Recommendations
     const activeProducts = await prisma.product.findMany({
       where: { isActive: true },
-      include: { variants: true },
+      include: { variants: { where: { isActive: true } } },
     });
 
     const needProfile = customer.needProfiles?.[0];
     let recommendations: any[] = [];
 
     if (needProfile) {
-      const preferredSizes = needProfile.preferredSizes ? JSON.parse(needProfile.preferredSizes) : [];
-      const preferredColors = needProfile.preferredColors ? JSON.parse(needProfile.preferredColors) : [];
+      const preferredSizes = readStringArray(needProfile.preferredSizes);
+      const preferredColors = readStringArray(needProfile.preferredColors);
 
       // Extract previous purchased collections for affinity bonus
       const previousPurchasedCollections = customer.orders.flatMap((o) =>
@@ -84,11 +101,11 @@ export async function GET(
           paymentPreference: needProfile.paymentPreference,
           previousPurchasedCollections,
         },
-        activeProducts as any
+        activeProducts
       ).slice(0, 6);
     } else {
       // General catalog showcase without fabricating customer preferences
-      recommendations = recommendCarpets({}, activeProducts as any).slice(0, 4);
+      recommendations = recommendCarpets({}, activeProducts).slice(0, 4);
     }
 
     // 3. Construct Unified Chronological Activity Timeline
@@ -191,6 +208,9 @@ export async function PUT(
   try {
     const session = await getSessionFromRequest(req);
     if (!session) return NextResponse.json({ error: "عدم احراز هویت" }, { status: 401 });
+    if (!canMutateCrm(session)) {
+      return NextResponse.json({ error: "نقش فقط‌خواندنی مجاز به ویرایش مشتری نیست." }, { status: 403 });
+    }
 
     const { id } = await params;
     const rawBody = await req.json().catch(() => null);
@@ -209,7 +229,7 @@ export async function PUT(
     }
 
     // Server-side RBAC: Sales reps can only update their own customers and cannot reassign
-    if (session.role === "SALES_REP" && currentCustomer.assignedToId !== session.userId) {
+    if (!canAccessOwners(session, [currentCustomer.assignedToId])) {
       return NextResponse.json({ error: "عدم دسترسی برای ویرایش این مشتری" }, { status: 403 });
     }
 
@@ -254,7 +274,7 @@ export async function PUT(
 
     const updatedCustomer = await prisma.$transaction(async (tx) => {
       const updated = await tx.customer.update({
-        where: { id },
+        where: { ...getCustomerScope(session), id },
         data: {
           firstName,
           lastName,
@@ -267,7 +287,7 @@ export async function PUT(
           notes,
           assignedToId: targetAssignedToId,
         },
-        include: { needProfiles: true, assignedTo: true },
+        include: { needProfiles: true, assignedTo: { select: PUBLIC_USER_SELECT } },
       });
 
       if (
@@ -282,10 +302,10 @@ export async function PUT(
           where: { customerId: id },
           create: {
             customerId: id,
-            preferredSizes: JSON.stringify(preferredSizes || ["3x4"]),
+            preferredSizes: preferredSizes || ["3x4"],
             preferredShane,
             preferredDensity,
-            preferredColors: JSON.stringify(preferredColors || ["سرمه‌ای"]),
+            preferredColors: preferredColors || ["سرمه‌ای"],
             preferredStyle,
             preferredCollection,
             budgetMin: budgetMin !== undefined && budgetMin !== null ? Math.round(budgetMin) : null,
@@ -295,10 +315,10 @@ export async function PUT(
             spaceType,
           },
           update: {
-            preferredSizes: preferredSizes ? JSON.stringify(preferredSizes) : undefined,
+            preferredSizes: preferredSizes || undefined,
             preferredShane,
             preferredDensity,
-            preferredColors: preferredColors ? JSON.stringify(preferredColors) : undefined,
+            preferredColors: preferredColors || undefined,
             preferredStyle,
             preferredCollection,
             budgetMin: budgetMin !== undefined ? (budgetMin !== null ? Math.round(budgetMin) : null) : undefined,
@@ -334,7 +354,8 @@ export async function DELETE(
 ) {
   try {
     const session = await getSessionFromRequest(req);
-    if (!session || (session.role !== "ADMIN" && session.role !== "SALES_MANAGER")) {
+    if (!session) return NextResponse.json({ error: "عدم احراز هویت" }, { status: 401 });
+    if (!hasAllowedRole(session, MANAGEMENT_ROLES)) {
       return NextResponse.json({ error: "عدم دسترسی کافی برای حذف مشتری" }, { status: 403 });
     }
 

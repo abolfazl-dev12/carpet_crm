@@ -25,6 +25,7 @@ import {
   toPersianDigits,
   formatCarpetSize,
 } from "@/lib/persian";
+import { readStringArray } from "@/lib/json-fields";
 
 export default function ProductsPage() {
   const [products, setProducts] = useState<any[]>([]);
@@ -290,7 +291,7 @@ export default function ProductsPage() {
           </div>
         ) : (
           products.map((p) => {
-            const images = p.images ? JSON.parse(p.images) : [];
+            const images = readStringArray(p.images);
             const coverImage =
               images[0] ||
               "https://images.unsplash.com/photo-1600121848594-d8644e57abab?w=600&auto=format&fit=crop&q=80";

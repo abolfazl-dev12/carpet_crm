@@ -670,9 +670,11 @@ export default function TeamPage() {
             onChange={(e) => setFormData({ ...formData, phone: e.target.value })}
           />
           <Input
-            label="رمز عبور اولیه"
+            label="رمز عبور اولیه (حداقل ۱۲ نویسه)"
             type="password"
             required
+            minLength={12}
+            maxLength={128}
             value={formData.password}
             onChange={(e) => setFormData({ ...formData, password: e.target.value })}
           />
@@ -726,9 +728,11 @@ export default function TeamPage() {
             onChange={(e) => setEditData({ ...editData, phone: e.target.value })}
           />
           <Input
-            label="رمز عبور جدید (اختیاری)"
+            label="رمز عبور جدید (اختیاری، حداقل ۱۲ نویسه)"
             type="password"
             placeholder="در صورت عدم تغییر، خالی بگذارید"
+            minLength={12}
+            maxLength={128}
             value={editData.password}
             onChange={(e) => setEditData({ ...editData, password: e.target.value })}
           />

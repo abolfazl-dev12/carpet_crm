@@ -39,7 +39,7 @@ The Persian Carpet CRM is built as a unified, modular, modern web application on
 +-----------------------------------------------------------------------------------+
 |                               Data Persistence Layer                              |
 |  - Prisma ORM (Type-safe models, relations, indices, transactions)                |
-|  - Database: SQLite (Embedded zero-config) / PostgreSQL (Enterprise Production)   |
+|  - Database: SQLite (local/test compatibility) / PostgreSQL (production)          |
 |  - Indexed entities: Phone numbers, Carpet SKUs, Deal Stages, Customer IDs        |
 +-----------------------------------------------------------------------------------+
 ```

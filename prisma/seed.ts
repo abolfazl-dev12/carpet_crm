@@ -1,43 +1,85 @@
-import { PrismaClient } from "@prisma/client";
-import bcrypt from "bcryptjs";
+import { PrismaClient, type Prisma } from "@prisma/client";
+import { hashPassword } from "../src/lib/password";
+import { assertDisposableDatabase, readSeedSafetyConfig } from "../scripts/postgresql-test-safety.cjs";
 
-const prisma = new PrismaClient();
+let prisma: PrismaClient;
 
-async function main() {
-  if (process.env.NODE_ENV === "production" && process.env.ALLOW_PRODUCTION_SEED !== "true") {
-    console.error("⚠️ هشدار امنیتی: اجرای اسکریپت seed در محیط Production مجاز نیست مگر اینکه متغیر ALLOW_PRODUCTION_SEED=true تنظیم شده باشد.");
-    process.exit(1);
+function createSyntheticPhone(sequence: number): string {
+  return `09${String(sequence).padStart(9, "0")}`;
+}
+
+function getSeedPassword(): string {
+  const password = process.env.SEED_DEFAULT_PASSWORD?.trim();
+  const normalizedPassword = password?.toLowerCase() || "";
+  const isKnownUnsafeDefault =
+    normalizedPassword === "123456" ||
+    normalizedPassword === "password" ||
+    normalizedPassword === "devadmin#2026" ||
+    normalizedPassword === "changeme";
+
+  if (!password || password.length < 12 || isKnownUnsafeDefault) {
+    throw new Error(
+      "SEED_DEFAULT_PASSWORD باید در فایل محیط محلی با یک رمز منحصربه‌فرد حداقل ۱۲ نویسه‌ای تنظیم شود."
+    );
   }
 
-  console.log("🌱 شروع ایجاد داده‌های اولیه سامانه فروش و CRM فرش (DEVELOPMENT ONLY)...");
+  return password;
+}
 
-  // 1. Clean existing records
-  await prisma.auditLog.deleteMany();
-  await prisma.notification.deleteMany();
-  await prisma.automationRule.deleteMany();
-  await prisma.installment.deleteMany();
-  await prisma.payment.deleteMany();
-  await prisma.orderItem.deleteMany();
-  await prisma.order.deleteMany();
-  await prisma.followUp.deleteMany();
-  await prisma.deal.deleteMany();
-  await prisma.inventoryMovement.deleteMany();
-  await prisma.productVariant.deleteMany();
-  await prisma.product.deleteMany();
-  await prisma.carpetNeedProfile.deleteMany();
-  await prisma.lead.deleteMany();
-  await prisma.customer.deleteMany();
-  await prisma.user.deleteMany();
+async function clearSeedData(client: Prisma.TransactionClient) {
+  await client.auditLog.deleteMany();
+  await client.notification.deleteMany();
+  await client.automationRule.deleteMany();
+  await client.installment.deleteMany();
+  await client.payment.deleteMany();
+  await client.orderItem.deleteMany();
+  await client.order.deleteMany();
+  await client.followUp.deleteMany();
+  await client.deal.deleteMany();
+  await client.inventoryMovement.deleteMany();
+  await client.productVariant.deleteMany();
+  await client.product.deleteMany();
+  await client.carpetNeedProfile.deleteMany();
+  await client.lead.deleteMany();
+  await client.customer.deleteMany();
+  await client.user.deleteMany();
+}
 
-  // 2. Create Users (DEVELOPMENT ONLY DEMO PASSWORDS)
-  const initialPassword = process.env.SEED_DEFAULT_PASSWORD || "123456";
-  const defaultPasswordHash = await bcrypt.hash(initialPassword, 10);
+async function main() {
+  const environment = { ...process.env };
+  const localSqlite = !environment.POSTGRES_TEST_DATABASE_URL &&
+    environment.DATABASE_URL?.startsWith("file:");
+  const initialPassword = getSeedPassword();
+
+  if (localSqlite) {
+    if (!["development", "test"].includes(environment.NODE_ENV || "development")) {
+      throw new Error("SQLite seed is allowed only in local development/test.");
+    }
+    prisma = new PrismaClient({ datasourceUrl: environment.DATABASE_URL });
+    // A PostgreSQL-generated Client cannot enter cleanup by claiming a file URL.
+    await prisma.$queryRawUnsafe("PRAGMA database_list");
+    await clearSeedData(prisma);
+  } else {
+    const { url } = readSeedSafetyConfig(environment);
+    // Never use the ordinary application DATABASE_URL for PostgreSQL seed.
+    prisma = new PrismaClient({ datasourceUrl: url });
+    await prisma.$transaction(async tx => {
+      await assertDisposableDatabase(tx, environment);
+      // Marker remains locked through cleanup; no cached runner authorization.
+      await clearSeedData(tx);
+    }, { maxWait: 30_000, timeout: 60_000 });
+  }
+
+  console.log("🌱 شروع ایجاد داده‌های اولیه سامانه فروش و CRM فرش...");
+
+  // 2. Create Users
+  const defaultPasswordHash = await hashPassword(initialPassword);
 
   const admin = await prisma.user.create({
     data: {
-      name: "مهندس علیرضا کاشانی",
-      email: "admin@carpet-crm.ir",
-      phone: "09121111111",
+      name: "مدیر ارشد آزمایشی",
+      email: "admin@example.invalid",
+      phone: createSyntheticPhone(1),
       passwordHash: defaultPasswordHash,
       role: "ADMIN",
       avatar: "https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=150&auto=format&fit=crop&q=80",
@@ -46,9 +88,9 @@ async function main() {
 
   const manager = await prisma.user.create({
     data: {
-      name: "سارا حسینی (مدیر فروش)",
-      email: "manager@carpet-crm.ir",
-      phone: "09122222222",
+      name: "مدیر فروش آزمایشی",
+      email: "manager@example.invalid",
+      phone: createSyntheticPhone(2),
       passwordHash: defaultPasswordHash,
       role: "SALES_MANAGER",
       avatar: "https://images.unsplash.com/photo-1580489944761-15a19d654956?w=150&auto=format&fit=crop&q=80",
@@ -57,9 +99,9 @@ async function main() {
 
   const rep1 = await prisma.user.create({
     data: {
-      name: "محمد رضایی (کارشناس ارشد فرش)",
-      email: "rep1@carpet-crm.ir",
-      phone: "09123333333",
+      name: "کارشناس فروش آزمایشی ۱",
+      email: "rep1@example.invalid",
+      phone: createSyntheticPhone(3),
       passwordHash: defaultPasswordHash,
       role: "SALES_REP",
       avatar: "https://images.unsplash.com/photo-1507003211169-0a1dd7228f2d?w=150&auto=format&fit=crop&q=80",
@@ -68,9 +110,9 @@ async function main() {
 
   const rep2 = await prisma.user.create({
     data: {
-      name: "مریم ابراهیمی (مشاور دکوراسیون)",
-      email: "rep2@carpet-crm.ir",
-      phone: "09124444444",
+      name: "کارشناس فروش آزمایشی ۲",
+      email: "rep2@example.invalid",
+      phone: createSyntheticPhone(4),
       passwordHash: defaultPasswordHash,
       role: "SALES_REP",
       avatar: "https://images.unsplash.com/photo-1573496359142-b8d87734a5a2?w=150&auto=format&fit=crop&q=80",
@@ -95,9 +137,9 @@ async function main() {
       weavingMachine: "وندویل HCI X3 بلژیک",
       style: "کلاسیک",
       primaryColor: "سرمه‌ای",
-      images: JSON.stringify([
+      images: [
         "https://images.unsplash.com/photo-1600121848594-d8644e57abab?w=600&auto=format&fit=crop&q=80",
-      ]),
+      ],
       description: "طرح اصیل شاه‌عباسی اصفهان با بافت فوق‌ریز ۱۵۰۰ شانه، ضد پرز و حساسیت با لطافت ابریشم‌گونه.",
       variants: [
         { size: "3x4", area: 12, cash: 48000000, inst: 54000000, stock: 8 },
@@ -118,9 +160,9 @@ async function main() {
       weavingMachine: "شونهر آلمان",
       style: "نئوکلاسیک",
       primaryColor: "کرم صدفی",
-      images: JSON.stringify([
+      images: [
         "https://images.unsplash.com/photo-1579656381226-5fc0f0100c3b?w=600&auto=format&fit=crop&q=80",
-      ]),
+      ],
       description: "نقشه افشان بدون ترنج مرکزی، مناسب دکوراسیون‌های مدرن و کلاسیک با رنگ‌بندی گرم و روشن.",
       variants: [
         { size: "3x4", area: 12, cash: 38000000, inst: 43000000, stock: 10 },
@@ -140,9 +182,9 @@ async function main() {
       weavingMachine: "وندویل بلژیک",
       style: "کلاسیک",
       primaryColor: "لاکی زرشکی",
-      images: JSON.stringify([
+      images: [
         "https://images.unsplash.com/photo-1596178065887-1198b6148b2b?w=600&auto=format&fit=crop&q=80",
-      ]),
+      ],
       description: "اثر ماندگار با طرح سنتی شکارگاه و صحنه‌های حماسی با رنگ لاکی روناسی طبیعی.",
       variants: [
         { size: "3x4", area: 12, cash: 52000000, inst: 59000000, stock: 4 },
@@ -162,9 +204,9 @@ async function main() {
       weavingMachine: "شونهر آلمان",
       style: "مدرن",
       primaryColor: "طوسی نقره‌ای",
-      images: JSON.stringify([
+      images: [
         "https://images.unsplash.com/photo-1584100936595-c0654b55a2e2?w=600&auto=format&fit=crop&q=80",
-      ]),
+      ],
       description: "طرح پتینه برجسته طلاکوب مدرن با هارمونی طوسی و متالیک، انتخابی ایده‌آل برای منازل لوکس مدرن.",
       variants: [
         { size: "3x4", area: 12, cash: 35000000, inst: 40000000, stock: 9 },
@@ -185,9 +227,9 @@ async function main() {
       weavingMachine: "وندویل HCP",
       style: "عشایری",
       primaryColor: "گردویی چندرنگ",
-      images: JSON.stringify([
+      images: [
         "https://images.unsplash.com/photo-1600585154340-be6161a56a0c?w=600&auto=format&fit=crop&q=80",
-      ]),
+      ],
       description: "نقوش خشت‌های باستانی ایران، گل و مرغ، درخت زندگی با ضخامت بالا و پاخور عالی.",
       variants: [
         { size: "3x4", area: 12, cash: 22000000, inst: 25500000, stock: 12 },
@@ -208,9 +250,9 @@ async function main() {
       weavingMachine: "شونهر آلمان",
       style: "کلاسیک",
       primaryColor: "کرم فیروزه‌ای",
-      images: JSON.stringify([
+      images: [
         "https://images.unsplash.com/photo-1513694203232-719a280e022f?w=600&auto=format&fit=crop&q=80",
-      ]),
+      ],
       description: "طرح چشم‌نواز مسجد شیخ لطف‌الله اصفهان با تلفیق کرم و فیروزه‌ای اصیل ایرانی.",
       variants: [
         { size: "3x4", area: 12, cash: 31000000, inst: 36000000, stock: 6 },
@@ -230,9 +272,9 @@ async function main() {
       weavingMachine: "وندویل بلژیک",
       style: "مدرن",
       primaryColor: "کرم طوسی",
-      images: JSON.stringify([
+      images: [
         "https://images.unsplash.com/photo-1544457070-4cd773b4d71e?w=600&auto=format&fit=crop&q=80",
-      ]),
+      ],
       description: "طراحی مدرن مینیمال با خطوط هندسی محو، سازگار با چیدمان‌های مدرن و مینیمالیستی.",
       variants: [
         { size: "2.5x3.5", area: 9, cash: 25000000, inst: 29000000, stock: 8 },
@@ -252,9 +294,9 @@ async function main() {
       weavingMachine: "وندویل HCI",
       style: "کلاسیک",
       primaryColor: "سرمه‌ای طلایی",
-      images: JSON.stringify([
+      images: [
         "https://images.unsplash.com/photo-1600121848594-d8644e57abab?w=600&auto=format&fit=crop&q=80",
-      ]),
+      ],
       description: "ظرافت بی‌مانند مشابه فرش‌های دستباف ۱۰۰ رج قم، دارای درخشش نور با تغییر زاویه دید.",
       variants: [
         { size: "3x4", area: 12, cash: 58000000, inst: 66000000, stock: 3 },
@@ -301,45 +343,45 @@ async function main() {
 
   console.log(`✅ ${createdProducts.length} تخته فرش کاتالوگ با تمامی تنوع‌های سایز و قیمت ثبت شد.`);
 
-  // 4. Create Customers with Realistic Iranian Names
-  const customerNames = [
-    { fn: "حسین", ln: "مرادی", prov: "تهران", city: "تهران", phone: "09121458963", code: "CST-1001" },
-    { fn: "زهرا", ln: "صادقیان", prov: "اصفهان", city: "اصفهان", phone: "09132569874", code: "CST-1002" },
-    { fn: "امیرحسین", ln: "فروتن", prov: "فارس", city: "شیراز", phone: "09173698521", code: "CST-1003" },
-    { fn: "فاطمه", ln: "رستمی", prov: "خراسان رضوی", city: "مشهد", phone: "09151234567", code: "CST-1004" },
-    { fn: "مهدی", ln: "کیانی", prov: "آذربایجان شرقی", city: "تبریز", phone: "09149876543", code: "CST-1005" },
-    { fn: "نرگس", ln: "خسروی", prov: "گیلان", city: "رشت", phone: "09113216549", code: "CST-1006" },
-    { fn: "علیرضا", ln: "تقوی", prov: "مازندران", city: "ساری", phone: "09118529631", code: "CST-1007" },
-    { fn: "مریم", ln: "باقری", prov: "قم", city: "قم", phone: "09127539514", code: "CST-1008" },
-    { fn: "سعید", ln: "یزدانی", prov: "یزد", city: "یزد", phone: "09139517532", code: "CST-1009" },
-    { fn: "پروانه", ln: "جعفری", prov: "البرز", city: "کرج", phone: "09351478523", code: "CST-1010" },
-    { fn: "کامران", ln: "افشار", prov: "خوزستان", city: "اهواز", phone: "09163214569", code: "CST-1011" },
-    { fn: "آرزو", ln: "مختاری", prov: "مرکزی", city: "اراک", phone: "09187412589", code: "CST-1012" },
-    { fn: "پیمان", ln: "شجاعی", prov: "اصفهان", city: "کاشان", phone: "09133612587", code: "CST-1013" },
-    { fn: "سیمین", ln: "دانشور", prov: "تهران", city: "شهریار", phone: "09128521479", code: "CST-1014" },
-    { fn: "داوود", ln: "طاهری", prov: "همدان", city: "همدان", phone: "09183124569", code: "CST-1015" },
+  // 4. Create explicitly synthetic customers. Never copy real customer data into this file.
+  const customerFixtures = [
+    { prov: "تهران", city: "تهران", code: "CST-1001" },
+    { prov: "اصفهان", city: "اصفهان", code: "CST-1002" },
+    { prov: "فارس", city: "شیراز", code: "CST-1003" },
+    { prov: "خراسان رضوی", city: "مشهد", code: "CST-1004" },
+    { prov: "آذربایجان شرقی", city: "تبریز", code: "CST-1005" },
+    { prov: "گیلان", city: "رشت", code: "CST-1006" },
+    { prov: "مازندران", city: "ساری", code: "CST-1007" },
+    { prov: "قم", city: "قم", code: "CST-1008" },
+    { prov: "یزد", city: "یزد", code: "CST-1009" },
+    { prov: "البرز", city: "کرج", code: "CST-1010" },
+    { prov: "خوزستان", city: "اهواز", code: "CST-1011" },
+    { prov: "مرکزی", city: "اراک", code: "CST-1012" },
+    { prov: "اصفهان", city: "کاشان", code: "CST-1013" },
+    { prov: "تهران", city: "شهریار", code: "CST-1014" },
+    { prov: "همدان", city: "همدان", code: "CST-1015" },
   ];
 
   const createdCustomers = [];
-  for (let i = 0; i < customerNames.length; i++) {
-    const c = customerNames[i];
+  for (let i = 0; i < customerFixtures.length; i++) {
+    const customerFixture = customerFixtures[i];
     const rep = allReps[i % allReps.length];
     const cust = await prisma.customer.create({
       data: {
-        code: c.code,
-        firstName: c.fn,
-        lastName: c.ln,
-        phone: c.phone,
-        province: c.prov,
-        city: c.city,
-        address: `خیابان اصلی، کوچه صبا، پلاک ${i + 12}`,
+        code: customerFixture.code,
+        firstName: "مشتری",
+        lastName: `آزمایشی ${i + 1}`,
+        phone: createSyntheticPhone(100 + i),
+        province: customerFixture.prov,
+        city: customerFixture.city,
+        address: `نشانی ساختگی مشتری آزمایشی ${i + 1}`,
         assignedToId: rep.id,
         needProfiles: {
           create: {
-            preferredSizes: JSON.stringify(["3x4", "2.5x3.5"]),
+            preferredSizes: ["3x4", "2.5x3.5"],
             preferredShane: i % 2 === 0 ? "1200" : "1500",
             preferredDensity: i % 2 === 0 ? "3600" : "4500",
-            preferredColors: JSON.stringify(i % 2 === 0 ? ["سرمه‌ای", "کرم"] : ["طوسی", "لاکی"]),
+            preferredColors: i % 2 === 0 ? ["سرمه‌ای", "کرم"] : ["طوسی", "لاکی"],
             preferredStyle: i % 3 === 0 ? "مدرن" : "کلاسیک",
             budgetMin: 20000000,
             budgetMax: 60000000,
@@ -378,53 +420,53 @@ async function main() {
     "LOST",
   ] as const;
 
-  const leadNames = [
-    { fn: "آرش", ln: "سرمدی", prov: "تهران", city: "تهران", phone: "09129998877", score: 75, temp: "HOT" as const, budget: 50000000 },
-    { fn: "مهسا", ln: "نیک‌بین", prov: "اصفهان", city: "اصفهان", phone: "09138887766", score: 65, temp: "HOT" as const, budget: 35000000 },
-    { fn: "رضا", ln: "قاسمی", prov: "فارس", city: "شیراز", phone: "09177776655", score: 45, temp: "WARM" as const, budget: 25000000 },
-    { fn: "الهام", ln: "صابری", prov: "خراسان رضوی", city: "مشهد", phone: "09156665544", score: 50, temp: "WARM" as const, budget: 40000000 },
-    { fn: "بهنام", ln: "کریمی", prov: "آذربایجان شرقی", city: "تبریز", phone: "09145554433", score: 20, temp: "COLD" as const, budget: 20000000 },
-    { fn: "نیلوفر", ln: "حسنی", prov: "گیلان", city: "رشت", phone: "09114443322", score: 80, temp: "HOT" as const, budget: 60000000 },
-    { fn: "ساسان", ln: "انصاری", prov: "مازندران", city: "بابل", phone: "09113332211", score: 35, temp: "WARM" as const, budget: 30000000 },
-    { fn: "شیدا", ln: "کاظمی", prov: "قم", city: "قم", phone: "09122221100", score: 10, temp: "COLD" as const, budget: 15000000 },
-    { fn: "کیوان", ln: "مطهری", prov: "یزد", city: "میبد", phone: "09131110099", score: 60, temp: "HOT" as const, budget: 45000000 },
-    { fn: "سمیرا", ln: "عباسی", prov: "البرز", city: "کرج", phone: "09350009988", score: 40, temp: "WARM" as const, budget: 28000000 },
-    { fn: "مسعود", ln: "نادری", prov: "خوزستان", city: "دزفول", phone: "09169990011", score: 70, temp: "HOT" as const, budget: 55000000 },
-    { fn: "فرزانه", ln: "ایزدی", prov: "مرکزی", city: "ساوه", phone: "09188881122", score: 25, temp: "COLD" as const, budget: 18000000 },
+  const leadFixtures = [
+    { prov: "تهران", city: "تهران", score: 75, temp: "HOT" as const, budget: 50000000 },
+    { prov: "اصفهان", city: "اصفهان", score: 65, temp: "HOT" as const, budget: 35000000 },
+    { prov: "فارس", city: "شیراز", score: 45, temp: "WARM" as const, budget: 25000000 },
+    { prov: "خراسان رضوی", city: "مشهد", score: 50, temp: "WARM" as const, budget: 40000000 },
+    { prov: "آذربایجان شرقی", city: "تبریز", score: 20, temp: "COLD" as const, budget: 20000000 },
+    { prov: "گیلان", city: "رشت", score: 80, temp: "HOT" as const, budget: 60000000 },
+    { prov: "مازندران", city: "بابل", score: 35, temp: "WARM" as const, budget: 30000000 },
+    { prov: "قم", city: "قم", score: 10, temp: "COLD" as const, budget: 15000000 },
+    { prov: "یزد", city: "میبد", score: 60, temp: "HOT" as const, budget: 45000000 },
+    { prov: "البرز", city: "کرج", score: 40, temp: "WARM" as const, budget: 28000000 },
+    { prov: "خوزستان", city: "دزفول", score: 70, temp: "HOT" as const, budget: 55000000 },
+    { prov: "مرکزی", city: "ساوه", score: 25, temp: "COLD" as const, budget: 18000000 },
   ];
 
   const createdLeads = [];
-  for (let i = 0; i < leadNames.length; i++) {
-    const l = leadNames[i];
+  for (let i = 0; i < leadFixtures.length; i++) {
+    const leadFixture = leadFixtures[i];
     const rep = allReps[i % allReps.length];
     const source = leadSources[i % leadSources.length];
     const status = leadStatuses[i % leadStatuses.length];
 
     const lead = await prisma.lead.create({
       data: {
-        firstName: l.fn,
-        lastName: l.ln,
-        phone: l.phone,
-        province: l.prov,
-        city: l.city,
+        firstName: "سرنخ",
+        lastName: `آزمایشی ${i + 1}`,
+        phone: createSyntheticPhone(200 + i),
+        province: leadFixture.prov,
+        city: leadFixture.city,
         source: source,
         campaign: i % 2 === 0 ? "کمپین تخفیف بهاره اینستاگرام" : "تبلیغات گوگل و پیامک",
         status: status,
-        score: l.score,
-        temperature: l.temp,
-        estimatedBudget: l.budget,
+        score: leadFixture.score,
+        temperature: leadFixture.temp,
+        estimatedBudget: leadFixture.budget,
         purchaseTimeframe: i % 2 === 0 ? "فوری (طی هفته جاری)" : "تا پایان ماه",
         notes: "نیاز به فرش ۹ متری ۱۲۰۰ شانه با زمینه روشن برای جهیزیه.",
         assignedToId: rep.id,
         needProfile: {
           create: {
-            preferredSizes: JSON.stringify(["2.5x3.5", "3x4"]),
+            preferredSizes: ["2.5x3.5", "3x4"],
             preferredShane: "1200",
             preferredDensity: "3600",
-            preferredColors: JSON.stringify(["کرم صدفی", "طوسی"]),
+            preferredColors: ["کرم صدفی", "طوسی"],
             preferredStyle: "نئوکلاسیک",
-            budgetMin: l.budget * 0.7,
-            budgetMax: l.budget,
+            budgetMin: leadFixture.budget * 0.7,
+            budgetMax: leadFixture.budget,
             quantity: 2,
             paymentPreference: "INSTALLMENT",
             spaceType: "پذیرایی",
@@ -580,8 +622,8 @@ async function main() {
     data: {
       name: "هشدار فوری لید داغ (امتیاز بالای ۵۵)",
       triggerType: "HOT_LEAD",
-      conditions: JSON.stringify({ scoreMin: 55 }),
-      actions: JSON.stringify({ notifyRep: true, notifyManager: true, priority: "URGENT" }),
+      conditions: { scoreMin: 55 },
+      actions: { notifyRep: true, notifyManager: true, priority: "URGENT" },
     },
   });
 
@@ -589,8 +631,8 @@ async function main() {
     data: {
       name: "یادآوری سررسید اقساط ۳ روز قبل از موعد",
       triggerType: "INSTALLMENT_DUE",
-      conditions: JSON.stringify({ daysBefore: 3 }),
-      actions: JSON.stringify({ sendSmsToCustomer: true, notifySeller: true }),
+      conditions: { daysBefore: 3 },
+      actions: { sendSmsToCustomer: true, notifySeller: true },
     },
   });
 
@@ -598,7 +640,7 @@ async function main() {
     data: {
       userId: rep1.id,
       title: "🔥 لید داغ جدید تخصیص داده شد",
-      message: "لید آرش سرمدی با بودجه ۵۰ میلیون تومان به شما واگذار شد. لطفا سریعا اقدام کنید.",
+      message: "یک لید آزمایشی داغ با بودجهٔ ۵۰ میلیون تومان به شما واگذار شد.",
       type: "HOT_LEAD",
       linkUrl: `/leads`,
     },
@@ -618,10 +660,11 @@ async function main() {
 }
 
 main()
-  .catch((e) => {
-    console.error("❌ خطا در اجرای Seeder:", e);
-    process.exit(1);
+  .catch(() => {
+    // Prisma errors can contain connection details or record values.
+    console.error("❌ اجرای seed ناموفق بود؛ جزئیات حساس نمایش داده نمی‌شود.");
+    process.exitCode = 1;
   })
   .finally(async () => {
-    await prisma.$disconnect();
+    await prisma?.$disconnect();
   });

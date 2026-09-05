@@ -42,6 +42,7 @@ import {
   formatCarpetSize,
 } from "@/lib/persian";
 import { getCustomerSegmentConfig } from "@/lib/customer-intelligence";
+import { readStringArray } from "@/lib/json-fields";
 
 export default function CustomerProfilePage() {
   const params = useParams();
@@ -208,12 +209,8 @@ export default function CustomerProfilePage() {
   }
 
   const needProfile = customer.needProfiles?.[0];
-  const preferredSizes = needProfile?.preferredSizes
-    ? JSON.parse(needProfile.preferredSizes)
-    : [];
-  const preferredColors = needProfile?.preferredColors
-    ? JSON.parse(needProfile.preferredColors)
-    : [];
+  const preferredSizes = readStringArray(needProfile?.preferredSizes);
+  const preferredColors = readStringArray(needProfile?.preferredColors);
 
   const segmentCfg = getCustomerSegmentConfig(intelligence?.segment || "WARM");
   const score = intelligence?.score || 0;
@@ -634,7 +631,7 @@ export default function CustomerProfilePage() {
               {recommendations.map((rec, i) => {
                 const p = rec.product;
                 const v = rec.matchedVariant;
-                const images = p.images ? JSON.parse(p.images) : [];
+                const images = readStringArray(p.images);
                 const imgUrl = images[0] || "https://images.unsplash.com/photo-1600121848594-d8644e57abab?w=400";
 
                 return (

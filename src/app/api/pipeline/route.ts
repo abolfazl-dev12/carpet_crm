@@ -1,8 +1,26 @@
 import { NextRequest, NextResponse } from "next/server";
+import type { Prisma } from "@prisma/client";
 import prisma from "@/lib/prisma";
+import { PUBLIC_USER_SELECT } from "@/lib/public-user";
 import { getSessionFromRequest } from "@/lib/auth";
+import {
+  canAccessOwners,
+  canMutateCrm,
+  checkRelatedResourceAccess,
+  getDealScope,
+  getFollowUpScope,
+} from "@/lib/authorization";
 import { logAuditEvent } from "@/lib/audit";
 import { dealCreateSchema, dealUpdateSchema } from "@/lib/validations/schemas";
+
+class RelatedDealResourceError extends Error {
+  constructor(
+    message: string,
+    readonly status: 400 | 403
+  ) {
+    super(message);
+  }
+}
 
 export async function GET(req: NextRequest) {
   try {
@@ -12,10 +30,8 @@ export async function GET(req: NextRequest) {
     const { searchParams } = new URL(req.url);
     const repId = searchParams.get("repId");
 
-    const whereClause: any = {};
-    if (session.role === "SALES_REP") {
-      whereClause.assignedToId = session.userId;
-    } else if (repId) {
+    const whereClause: Prisma.DealWhereInput = getDealScope(session);
+    if (session.role !== "SALES_REP" && repId) {
       whereClause.assignedToId = repId;
     }
 
@@ -48,7 +64,7 @@ export async function GET(req: NextRequest) {
         variant: { select: { id: true, sku: true, size: true, cashPrice: true } },
         assignedTo: { select: { id: true, name: true, avatar: true } },
         followUps: {
-          where: { status: "PENDING" },
+          where: { status: "PENDING", ...getFollowUpScope(session) },
           orderBy: { scheduledAt: "asc" },
           take: 1,
         },
@@ -67,6 +83,9 @@ export async function POST(req: NextRequest) {
   try {
     const session = await getSessionFromRequest(req);
     if (!session) return NextResponse.json({ error: "عدم احراز هویت" }, { status: 401 });
+    if (!canMutateCrm(session)) {
+      return NextResponse.json({ error: "نقش فقط‌خواندنی مجاز به ایجاد معامله نیست." }, { status: 403 });
+    }
 
     const rawBody = await req.json().catch(() => null);
     const parsed = dealCreateSchema.safeParse(rawBody);
@@ -98,26 +117,42 @@ export async function POST(req: NextRequest) {
         ? session.userId
         : assignedToId || session.userId;
 
-    const deal = await prisma.deal.create({
-      data: {
-        title,
-        value: Math.round(value || 0),
-        stage,
-        priority,
-        leadId: leadId || null,
-        customerId: customerId || null,
-        productId: productId || null,
-        variantId: variantId || null,
-        assignedToId: targetRepId,
-        expectedCloseDate: expectedCloseDate ? new Date(expectedCloseDate) : null,
-        notes: notes || null,
-      },
-      include: {
-        lead: true,
-        customer: true,
-        product: true,
-        assignedTo: true,
-      },
+    const deal = await prisma.$transaction(async (tx) => {
+      const relatedAccess = await checkRelatedResourceAccess(
+        session,
+        { leadId, customerId },
+        tx
+      );
+      if (relatedAccess !== "ALLOWED") {
+        throw new RelatedDealResourceError(
+          relatedAccess === "NOT_FOUND"
+            ? "مشتری یا سرنخ مرتبط یافت نشد."
+            : "عدم دسترسی به مشتری یا سرنخ مرتبط با معامله",
+          relatedAccess === "NOT_FOUND" ? 400 : 403
+        );
+      }
+
+      return tx.deal.create({
+        data: {
+          title,
+          value: Math.round(value || 0),
+          stage,
+          priority,
+          leadId: leadId || null,
+          customerId: customerId || null,
+          productId: productId || null,
+          variantId: variantId || null,
+          assignedToId: targetRepId,
+          expectedCloseDate: expectedCloseDate ? new Date(expectedCloseDate) : null,
+          notes: notes || null,
+        },
+        include: {
+          lead: true,
+          customer: true,
+          product: true,
+          assignedTo: { select: PUBLIC_USER_SELECT },
+        },
+      });
     });
 
     await logAuditEvent({
@@ -129,7 +164,10 @@ export async function POST(req: NextRequest) {
     });
 
     return NextResponse.json({ success: true, deal });
-  } catch (error: any) {
+  } catch (error: unknown) {
+    if (error instanceof RelatedDealResourceError) {
+      return NextResponse.json({ error: error.message }, { status: error.status });
+    }
     console.error("Error creating deal:", error);
     return NextResponse.json({ error: "خطا در ایجاد معامله جدید" }, { status: 500 });
   }
@@ -139,6 +177,9 @@ export async function PUT(req: NextRequest) {
   try {
     const session = await getSessionFromRequest(req);
     if (!session) return NextResponse.json({ error: "عدم احراز هویت" }, { status: 401 });
+    if (!canMutateCrm(session)) {
+      return NextResponse.json({ error: "نقش فقط‌خواندنی مجاز به ویرایش معامله نیست." }, { status: 403 });
+    }
 
     const rawBody = await req.json().catch(() => null);
     const parsed = dealUpdateSchema.safeParse(rawBody);
@@ -158,12 +199,16 @@ export async function PUT(req: NextRequest) {
     }
 
     // Server-side RBAC: Sales reps can only edit their own deals
-    if (session.role === "SALES_REP" && currentDeal.assignedToId !== session.userId) {
+    const relatedAccess = await checkRelatedResourceAccess(session, currentDeal);
+    if (
+      !canAccessOwners(session, [currentDeal.assignedToId]) ||
+      relatedAccess !== "ALLOWED"
+    ) {
       return NextResponse.json({ error: "عدم دسترسی برای ویرایش این معامله" }, { status: 403 });
     }
 
     const updatedDeal = await prisma.deal.update({
-      where: { id },
+      where: { ...getDealScope(session), id },
       data: {
         title,
         value: value !== undefined ? Math.round(value) : undefined,
@@ -176,7 +221,7 @@ export async function PUT(req: NextRequest) {
         lead: true,
         customer: true,
         product: true,
-        assignedTo: true,
+        assignedTo: { select: PUBLIC_USER_SELECT },
       },
     });
 
@@ -199,6 +244,9 @@ export async function DELETE(req: NextRequest) {
   try {
     const session = await getSessionFromRequest(req);
     if (!session) return NextResponse.json({ error: "عدم احراز هویت" }, { status: 401 });
+    if (!canMutateCrm(session)) {
+      return NextResponse.json({ error: "نقش فقط‌خواندنی مجاز به حذف معامله نیست." }, { status: 403 });
+    }
 
     const { searchParams } = new URL(req.url);
     const id = searchParams.get("id");
@@ -213,12 +261,16 @@ export async function DELETE(req: NextRequest) {
     }
 
     // Server-side RBAC: Sales reps can only delete their own deals
-    if (session.role === "SALES_REP" && currentDeal.assignedToId !== session.userId) {
+    const relatedAccess = await checkRelatedResourceAccess(session, currentDeal);
+    if (
+      !canAccessOwners(session, [currentDeal.assignedToId]) ||
+      relatedAccess !== "ALLOWED"
+    ) {
       return NextResponse.json({ error: "عدم دسترسی برای حذف این معامله" }, { status: 403 });
     }
 
     await prisma.deal.delete({
-      where: { id },
+      where: { ...getDealScope(session), id },
     });
 
     await logAuditEvent({

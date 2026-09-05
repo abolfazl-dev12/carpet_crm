@@ -5,6 +5,7 @@ import { ShieldCheck, Search, Filter } from "lucide-react";
 import { Card } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { formatJalaliDate, toPersianDigits } from "@/lib/persian";
+import { formatJsonValue } from "@/lib/json-fields";
 
 export default function AuditLogsPage() {
   const [logs, setLogs] = useState<any[]>([]);
@@ -81,7 +82,7 @@ export default function AuditLogsPage() {
                       {log.user?.name || "سیستم خودکار"}
                     </td>
                     <td className="p-3.5 font-mono text-[11px] text-slate-500 max-w-xs truncate">
-                      {log.details || "-"}
+                      {formatJsonValue(log.details)}
                     </td>
                     <td className="p-3.5 font-mono text-slate-400">
                       {log.ipAddress || "127.0.0.1"}

@@ -1,9 +1,30 @@
 import { NextRequest, NextResponse } from "next/server";
+import { FollowUpStatus, type Prisma } from "@prisma/client";
 import prisma from "@/lib/prisma";
+import { PUBLIC_USER_SELECT } from "@/lib/public-user";
 import { getSessionFromRequest } from "@/lib/auth";
+import {
+  canAccessOwners,
+  canMutateCrm,
+  checkRelatedResourceAccess,
+  getCustomerScope,
+  getDealScope,
+  getFollowUpScope,
+  getOrderScope,
+  isEnumValue,
+} from "@/lib/authorization";
 import { logAuditEvent } from "@/lib/audit";
 import { followUpCreateSchema, followUpUpdateSchema } from "@/lib/validations/schemas";
 import { evaluateCustomerIntelligence } from "@/lib/customer-intelligence";
+
+class RelatedFollowUpResourceError extends Error {
+  constructor(
+    message: string,
+    readonly status: 400 | 403
+  ) {
+    super(message);
+  }
+}
 
 export async function GET(req: NextRequest) {
   try {
@@ -14,15 +35,18 @@ export async function GET(req: NextRequest) {
     const status = searchParams.get("status");
     const repId = searchParams.get("repId");
 
-    const whereClause: any = {};
+    const whereClause: Prisma.FollowUpWhereInput = getFollowUpScope(session);
     // Server-side RBAC: Sales reps only see their assigned follow-ups
-    if (session.role === "SALES_REP") {
-      whereClause.assignedToId = session.userId;
-    } else if (repId) {
+    if (session.role !== "SALES_REP" && repId) {
       whereClause.assignedToId = repId;
     }
 
-    if (status) whereClause.status = status;
+    if (status) {
+      if (!isEnumValue(Object.values(FollowUpStatus), status)) {
+        return NextResponse.json({ error: "وضعیت پیگیری نامعتبر است." }, { status: 400 });
+      }
+      whereClause.status = status;
+    }
 
     const followUps = await prisma.followUp.findMany({
       where: whereClause,
@@ -35,13 +59,15 @@ export async function GET(req: NextRequest) {
     });
 
     // Generate Dynamic "Today's Sales Next Best Actions"
-    const customerFilter = session.role === "SALES_REP" ? { assignedToId: session.userId } : {};
     const relevantCustomers = await prisma.customer.findMany({
-      where: customerFilter,
+      where: getCustomerScope(session),
       include: {
-        orders: { include: { installments: true } },
-        deals: true,
-        followUps: true,
+        orders: {
+          where: getOrderScope(session),
+          include: { installments: true },
+        },
+        deals: { where: getDealScope(session) },
+        followUps: { where: getFollowUpScope(session) },
         needProfiles: true,
         assignedTo: { select: { name: true } },
       },
@@ -96,6 +122,9 @@ export async function POST(req: NextRequest) {
   try {
     const session = await getSessionFromRequest(req);
     if (!session) return NextResponse.json({ error: "عدم احراز هویت" }, { status: 401 });
+    if (!canMutateCrm(session)) {
+      return NextResponse.json({ error: "نقش فقط‌خواندنی مجاز به ثبت پیگیری نیست." }, { status: 403 });
+    }
 
     const rawBody = await req.json().catch(() => null);
     const parsed = followUpCreateSchema.safeParse(rawBody);
@@ -124,19 +153,35 @@ export async function POST(req: NextRequest) {
         ? session.userId
         : assignedToId || session.userId;
 
-    const followUp = await prisma.followUp.create({
-      data: {
-        title,
-        type,
-        priority,
-        status: "PENDING",
-        scheduledAt: new Date(scheduledAt),
-        leadId: leadId || null,
-        customerId: customerId || null,
-        dealId: dealId || null,
-        assignedToId: targetRepId,
-      },
-      include: { lead: true, customer: true, assignedTo: true },
+    const followUp = await prisma.$transaction(async (tx) => {
+      const relatedAccess = await checkRelatedResourceAccess(
+        session,
+        { leadId, customerId, dealId },
+        tx
+      );
+      if (relatedAccess !== "ALLOWED") {
+        throw new RelatedFollowUpResourceError(
+          relatedAccess === "NOT_FOUND"
+            ? "منبع مرتبط با پیگیری یافت نشد."
+            : "عدم دسترسی به منبع مرتبط با این پیگیری",
+          relatedAccess === "NOT_FOUND" ? 400 : 403
+        );
+      }
+
+      return tx.followUp.create({
+        data: {
+          title,
+          type,
+          priority,
+          status: "PENDING",
+          scheduledAt: new Date(scheduledAt),
+          leadId: leadId || null,
+          customerId: customerId || null,
+          dealId: dealId || null,
+          assignedToId: targetRepId,
+        },
+        include: { lead: true, customer: true, assignedTo: { select: PUBLIC_USER_SELECT } },
+      });
     });
 
     await logAuditEvent({
@@ -148,7 +193,10 @@ export async function POST(req: NextRequest) {
     });
 
     return NextResponse.json({ success: true, followUp });
-  } catch (error: any) {
+  } catch (error: unknown) {
+    if (error instanceof RelatedFollowUpResourceError) {
+      return NextResponse.json({ error: error.message }, { status: error.status });
+    }
     console.error("Error creating follow-up:", error);
     return NextResponse.json({ error: "خطا در ثبت پیگیری جدید" }, { status: 500 });
   }
@@ -158,6 +206,9 @@ export async function PUT(req: NextRequest) {
   try {
     const session = await getSessionFromRequest(req);
     if (!session) return NextResponse.json({ error: "عدم احراز هویت" }, { status: 401 });
+    if (!canMutateCrm(session)) {
+      return NextResponse.json({ error: "نقش فقط‌خواندنی مجاز به ویرایش پیگیری نیست." }, { status: 403 });
+    }
 
     const rawBody = await req.json().catch(() => null);
     const parsed = followUpUpdateSchema.safeParse(rawBody);
@@ -177,12 +228,16 @@ export async function PUT(req: NextRequest) {
     }
 
     // Server-side RBAC: Sales reps can only update their own follow-ups
-    if (session.role === "SALES_REP" && currentFollowUp.assignedToId !== session.userId) {
+    const relatedAccess = await checkRelatedResourceAccess(session, currentFollowUp);
+    if (
+      !canAccessOwners(session, [currentFollowUp.assignedToId]) ||
+      relatedAccess !== "ALLOWED"
+    ) {
       return NextResponse.json({ error: "عدم دسترسی برای تغییر وضعیت این پیگیری" }, { status: 403 });
     }
 
     const updated = await prisma.followUp.update({
-      where: { id },
+      where: { ...getFollowUpScope(session), id },
       data: {
         status,
         resultNote: resultNote || null,
@@ -201,6 +256,9 @@ export async function DELETE(req: NextRequest) {
   try {
     const session = await getSessionFromRequest(req);
     if (!session) return NextResponse.json({ error: "عدم احراز هویت" }, { status: 401 });
+    if (!canMutateCrm(session)) {
+      return NextResponse.json({ error: "نقش فقط‌خواندنی مجاز به حذف پیگیری نیست." }, { status: 403 });
+    }
 
     const { searchParams } = new URL(req.url);
     const id = searchParams.get("id");
@@ -215,12 +273,16 @@ export async function DELETE(req: NextRequest) {
     }
 
     // Server-side RBAC: Sales reps can only delete their own follow-ups
-    if (session.role === "SALES_REP" && currentFollowUp.assignedToId !== session.userId) {
+    const relatedAccess = await checkRelatedResourceAccess(session, currentFollowUp);
+    if (
+      !canAccessOwners(session, [currentFollowUp.assignedToId]) ||
+      relatedAccess !== "ALLOWED"
+    ) {
       return NextResponse.json({ error: "عدم دسترسی برای حذف این پیگیری" }, { status: 403 });
     }
 
     await prisma.followUp.delete({
-      where: { id },
+      where: { ...getFollowUpScope(session), id },
     });
 
     await logAuditEvent({

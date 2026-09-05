@@ -22,6 +22,7 @@ import {
   toPersianDigits,
   formatCarpetSize,
 } from "@/lib/persian";
+import { readStringArray } from "@/lib/json-fields";
 
 export default function RecommendationPage() {
   const [preferredSizes, setPreferredSizes] = useState<string[]>(["3x4"]);
@@ -204,7 +205,7 @@ export default function RecommendationPage() {
               {recommendations.map((item, idx) => {
                 const prod = item.product;
                 const variant = item.matchedVariant;
-                const images = prod.images ? JSON.parse(prod.images) : [];
+                const images = readStringArray(prod.images);
                 const coverImage =
                   images[0] ||
                   "https://images.unsplash.com/photo-1600121848594-d8644e57abab?w=600&auto=format&fit=crop&q=80";

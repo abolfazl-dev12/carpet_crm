@@ -1,6 +1,12 @@
 import { NextRequest, NextResponse } from "next/server";
+import type { Prisma } from "@prisma/client";
 import prisma from "@/lib/prisma";
 import { getSessionFromRequest, hashPassword } from "@/lib/auth";
+import {
+  ADMIN_ROLES,
+  hasAllowedRole,
+  MANAGEMENT_ROLES,
+} from "@/lib/authorization";
 import { logAuditEvent } from "@/lib/audit";
 import { normalizeIranianPhone, isValidIranianMobile } from "@/lib/persian";
 import { userCreateSchema, userUpdateSchema } from "@/lib/validations/schemas";
@@ -9,6 +15,9 @@ export async function GET(req: NextRequest) {
   try {
     const session = await getSessionFromRequest(req);
     if (!session) return NextResponse.json({ error: "عدم احراز هویت" }, { status: 401 });
+    if (!hasAllowedRole(session, MANAGEMENT_ROLES)) {
+      return NextResponse.json({ error: "عدم دسترسی به فهرست کاربران" }, { status: 403 });
+    }
 
     const users = await prisma.user.findMany({
       select: {
@@ -33,7 +42,7 @@ export async function GET(req: NextRequest) {
     });
 
     return NextResponse.json({ users });
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error("Error fetching team users:", error);
     return NextResponse.json({ error: "خطا در دریافت لیست کاربران" }, { status: 500 });
   }
@@ -42,7 +51,8 @@ export async function GET(req: NextRequest) {
 export async function POST(req: NextRequest) {
   try {
     const session = await getSessionFromRequest(req);
-    if (!session || session.role !== "ADMIN") {
+    if (!session) return NextResponse.json({ error: "عدم احراز هویت" }, { status: 401 });
+    if (!hasAllowedRole(session, ADMIN_ROLES)) {
       return NextResponse.json({ error: "فقط مدیر سیستم مجاز به تعریف کاربر جدید است." }, { status: 403 });
     }
 
@@ -101,7 +111,7 @@ export async function POST(req: NextRequest) {
     });
 
     return NextResponse.json({ success: true, user });
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error("Error creating user:", error);
     return NextResponse.json({ error: "خطا در ایجاد کاربر جدید" }, { status: 500 });
   }
@@ -110,8 +120,9 @@ export async function POST(req: NextRequest) {
 export async function PUT(req: NextRequest) {
   try {
     const session = await getSessionFromRequest(req);
-    if (!session || (session.role !== "ADMIN" && session.role !== "SALES_MANAGER")) {
-      return NextResponse.json({ error: "عدم دسترسی کافی برای ویرایش کاربر" }, { status: 403 });
+    if (!session) return NextResponse.json({ error: "عدم احراز هویت" }, { status: 401 });
+    if (!hasAllowedRole(session, ADMIN_ROLES)) {
+      return NextResponse.json({ error: "فقط مدیر ارشد مجاز به ویرایش کاربر است." }, { status: 403 });
     }
 
     const rawBody = await req.json().catch(() => null);
@@ -131,22 +142,44 @@ export async function PUT(req: NextRequest) {
       return NextResponse.json({ error: "شماره همراه نامعتبر است." }, { status: 400 });
     }
 
-    // Role escalation prevention: Only ADMIN can change someone's role to ADMIN
-    let targetRole = role;
-    if (session.role !== "ADMIN" && role === "ADMIN") {
-      targetRole = undefined; // Deny elevating to ADMIN by non-admin
+    const targetUser = await prisma.user.findUnique({ where: { id } });
+    if (!targetUser) {
+      return NextResponse.json({ error: "کاربر مورد نظر یافت نشد." }, { status: 404 });
     }
 
-    const updateData: any = {
+    // Prevent deactivating or demoting the last active ADMIN
+    if (targetUser.role === "ADMIN" && (isActive === false || (role && role !== "ADMIN"))) {
+      const activeAdminCount = await prisma.user.count({
+        where: { role: "ADMIN", isActive: true },
+      });
+      if (activeAdminCount <= 1) {
+        return NextResponse.json(
+          { error: "امکان غیرفعال‌سازی یا تغییر نقش تنها مدیر ارشد فعال سیستم وجود ندارد." },
+          { status: 400 }
+        );
+      }
+    }
+
+    const targetRole = role || targetUser.role;
+
+    const updateData: Prisma.UserUpdateInput = {
       name,
       email: email.toLowerCase().trim(),
       phone: cleanPhone,
-      role: targetRole || undefined,
+      role: targetRole,
       isActive: isActive !== undefined ? isActive : undefined,
     };
 
-    if (password && password.trim().length >= 6) {
-      updateData.passwordHash = await hashPassword(password.trim());
+    const passwordChanged = Boolean(password);
+    const roleChanged = targetRole !== targetUser.role;
+    const activeStatusChanged = isActive !== undefined && isActive !== targetUser.isActive;
+
+    if (password) {
+      updateData.passwordHash = await hashPassword(password);
+    }
+
+    if (passwordChanged || roleChanged || activeStatusChanged) {
+      updateData.sessionVersion = { increment: 1 };
     }
 
     const updatedUser = await prisma.user.update({
@@ -169,11 +202,15 @@ export async function PUT(req: NextRequest) {
       action: "UPDATE",
       entity: "User",
       entityId: id,
-      details: { name: updatedUser.name, role: updatedUser.role },
+      details: {
+        name: updatedUser.name,
+        role: updatedUser.role,
+        sessionsInvalidated: passwordChanged || roleChanged || activeStatusChanged,
+      },
     });
 
     return NextResponse.json({ success: true, user: updatedUser });
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error("Error updating user:", error);
     return NextResponse.json({ error: "خطا در ویرایش اطلاعات کاربر" }, { status: 500 });
   }
@@ -182,7 +219,8 @@ export async function PUT(req: NextRequest) {
 export async function DELETE(req: NextRequest) {
   try {
     const session = await getSessionFromRequest(req);
-    if (!session || session.role !== "ADMIN") {
+    if (!session) return NextResponse.json({ error: "عدم احراز هویت" }, { status: 401 });
+    if (!hasAllowedRole(session, ADMIN_ROLES)) {
       return NextResponse.json({ error: "فقط مدیر ارشد مجاز به حذف کاربر است." }, { status: 403 });
     }
 
@@ -197,6 +235,23 @@ export async function DELETE(req: NextRequest) {
       return NextResponse.json({ error: "شما نمی‌توانید حساب کاربری جاری خود را حذف کنید." }, { status: 400 });
     }
 
+    const targetUser = await prisma.user.findUnique({ where: { id } });
+    if (!targetUser) {
+      return NextResponse.json({ error: "کاربر مورد نظر یافت نشد." }, { status: 404 });
+    }
+
+    if (targetUser.role === "ADMIN") {
+      const activeAdminCount = await prisma.user.count({
+        where: { role: "ADMIN", isActive: true },
+      });
+      if (activeAdminCount <= 1) {
+        return NextResponse.json(
+          { error: "امکان حذف تنها مدیر ارشد فعال سیستم وجود ندارد." },
+          { status: 400 }
+        );
+      }
+    }
+
     await prisma.user.delete({
       where: { id },
     });
@@ -209,7 +264,7 @@ export async function DELETE(req: NextRequest) {
     });
 
     return NextResponse.json({ success: true });
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error("Error deleting user:", error);
     return NextResponse.json({ error: "خطا در حذف کاربر" }, { status: 500 });
   }

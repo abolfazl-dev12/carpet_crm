@@ -23,7 +23,7 @@ export interface CarpetProductWithVariants {
   density: number;
   style: string;
   primaryColor: string;
-  images: string; // JSON array
+  images: unknown;
   description?: string | null;
   variants: Array<{
     id: string;

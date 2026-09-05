@@ -1,10 +1,58 @@
 import { NextRequest, NextResponse } from "next/server";
+import type { Prisma } from "@prisma/client";
 import prisma from "@/lib/prisma";
 import { getSessionFromRequest } from "@/lib/auth";
+import {
+  canAccessOwners,
+  canMutateCrm,
+  getCustomerScope,
+  getOrderScope,
+} from "@/lib/authorization";
 import { logAuditEvent } from "@/lib/audit";
 import { orderCreateSchema } from "@/lib/validations/schemas";
 import { generateOrderNumber } from "@/lib/generators";
 import { addJalaliMonths } from "@/lib/persian";
+import { lockOrderForMutation, lockVariantForMutation } from "@/lib/transaction-locks";
+
+class OrderCreationError extends Error {}
+class OrderCreationAuthorizationError extends Error {}
+
+const PRISMA_INT_MAX = 2_147_483_647;
+const WRITE_TRANSACTION_OPTIONS = { maxWait: 30_000, timeout: 60_000 } as const;
+
+interface PricedOrderItem {
+  variantId: string;
+  quantity: number;
+  unitPrice: number;
+  totalPrice: number;
+  reservedStock: number;
+}
+
+function calculateServerDiscount(): number {
+  // No trusted promotion or discount policy exists yet. Client-provided discounts are forbidden.
+  return 0;
+}
+
+function calculateLineTotal(unitPrice: number, quantity: number): number {
+  if (!Number.isSafeInteger(unitPrice) || unitPrice <= 0) {
+    throw new OrderCreationError("قیمت ثبت‌شده برای یکی از کالاها معتبر نیست.");
+  }
+
+  const lineTotal = unitPrice * quantity;
+  if (!Number.isSafeInteger(lineTotal) || lineTotal > PRISMA_INT_MAX) {
+    throw new OrderCreationError("مبلغ یکی از اقلام سفارش از محدوده مجاز خارج است.");
+  }
+
+  return lineTotal;
+}
+
+function addMoney(currentTotal: number, amount: number): number {
+  const newTotal = currentTotal + amount;
+  if (!Number.isSafeInteger(newTotal) || newTotal > PRISMA_INT_MAX) {
+    throw new OrderCreationError("مبلغ کل سفارش از محدوده مجاز خارج است.");
+  }
+  return newTotal;
+}
 
 export async function GET(req: NextRequest) {
   try {
@@ -14,11 +62,9 @@ export async function GET(req: NextRequest) {
     const { searchParams } = new URL(req.url);
     const repId = searchParams.get("repId");
 
-    const whereClause: any = {};
+    const whereClause: Prisma.OrderWhereInput = getOrderScope(session);
     // Server-side RBAC: Sales reps only see their own sales
-    if (session.role === "SALES_REP") {
-      whereClause.sellerId = session.userId;
-    } else if (repId) {
+    if (session.role !== "SALES_REP" && repId) {
       whereClause.sellerId = repId;
     }
 
@@ -49,6 +95,9 @@ export async function POST(req: NextRequest) {
   try {
     const session = await getSessionFromRequest(req);
     if (!session) return NextResponse.json({ error: "عدم احراز هویت" }, { status: 401 });
+    if (!canMutateCrm(session)) {
+      return NextResponse.json({ error: "نقش فقط‌خواندنی مجاز به ثبت سفارش نیست." }, { status: 403 });
+    }
 
     const rawBody = await req.json().catch(() => null);
     const parsed = orderCreateSchema.safeParse(rawBody);
@@ -63,9 +112,7 @@ export async function POST(req: NextRequest) {
     const {
       customerId,
       items,
-      discountAmount,
       paymentMethod,
-      initialPaidAmount,
       installmentCount,
       shippingAddress,
       notes,
@@ -80,65 +127,100 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: "مشتری مورد نظر یافت نشد." }, { status: 404 });
     }
 
-    if (session.role === "SALES_REP" && customer.assignedToId !== session.userId) {
+    if (!canAccessOwners(session, [customer.assignedToId])) {
       return NextResponse.json(
         { error: "عدم دسترسی برای ثبت سفارش برای این مشتری." },
         { status: 403 }
       );
     }
 
-    // Precise financial calculations (integer Tomans)
-    const cleanDiscount = Math.max(0, Math.round(discountAmount || 0));
-    const totalAmount = items.reduce(
-      (sum, it) => sum + Math.round(Number(it.unitPrice)) * Math.max(1, Math.round(Number(it.quantity))),
-      0
-    );
-    const finalAmount = Math.max(0, totalAmount - cleanDiscount);
-    const paidAmount = Math.min(finalAmount, Math.max(0, Math.round(initialPaidAmount || 0)));
-    const remainingAmount = Math.max(0, finalAmount - paidAmount);
-
-    // Atomically execute: stock validation, order creation, inventory deduction, movement logging, payment, installments
+    // Atomically execute: authoritative pricing, stock validation, order creation,
+    // inventory deduction, movement logging, and installment generation.
     const order = await prisma.$transaction(async (tx) => {
-      // 1. Stock Validation & Race-condition check inside transaction
-      const variantStockSnapshots: Record<string, { currentStock: number; requestedQty: number; name: string; size: string }> = {};
+      // Re-check customer ownership inside the same transaction as the write so a
+      // concurrent reassignment cannot bypass the sales-rep ownership boundary.
+      const authorizedCustomer = await tx.customer.findFirst({
+        where: { id: customerId, ...getCustomerScope(session) },
+        select: { id: true },
+      });
+      if (!authorizedCustomer) {
+        if (session.role === "SALES_REP") {
+          throw new OrderCreationAuthorizationError(
+            "عدم دسترسی برای ثبت سفارش برای این مشتری."
+          );
+        }
+        throw new OrderCreationError("مشتری مورد نظر دیگر در دسترس نیست.");
+      }
+
+      // 1. Load authoritative variant prices and availability inside the transaction.
+      const variants = await tx.productVariant.findMany({
+        where: { id: { in: items.map((item) => item.variantId) } },
+        include: { product: true },
+      });
+      const variantsById = new Map(variants.map((variant) => [variant.id, variant]));
+      const pricedItems: PricedOrderItem[] = [];
 
       for (const item of items) {
-        const qty = Math.max(1, Math.round(Number(item.quantity)));
-        const variant = await tx.productVariant.findUnique({
-          where: { id: item.variantId },
-          include: { product: true },
-        });
+        const variant = variantsById.get(item.variantId);
 
         if (!variant) {
-          throw new Error("یکی از کالاهای انتخاب‌شده در انبار یافت نشد.");
+          throw new OrderCreationError("یکی از تنوع‌های انتخاب‌شده معتبر نیست.");
+        }
+
+        if (!variant.isActive || !variant.product.isActive) {
+          throw new OrderCreationError("یکی از تنوع‌های انتخاب‌شده غیرفعال است.");
+        }
+
+        if (
+          !Number.isSafeInteger(variant.stock) ||
+          !Number.isSafeInteger(variant.reservedStock) ||
+          variant.stock < 0 ||
+          variant.reservedStock < 0 ||
+          variant.reservedStock > variant.stock
+        ) {
+          throw new OrderCreationError("وضعیت موجودی یکی از کالاها معتبر نیست.");
         }
 
         const availableStock = variant.stock - (variant.reservedStock || 0);
-        if (qty > availableStock) {
-          throw new Error(
-            `موجودی کافی برای ثبت این سفارش وجود ندارد. کالا: "${variant.product.name} (${variant.size})"، موجودی آزاد: ${availableStock} تخته، تعداد درخواستی: ${qty} تخته`
+        if (item.quantity > availableStock) {
+          throw new OrderCreationError(
+            `موجودی کافی برای ثبت این سفارش وجود ندارد. کالا: "${variant.product.name} (${variant.size})"، موجودی آزاد: ${availableStock} تخته، تعداد درخواستی: ${item.quantity} تخته`
           );
         }
 
-        variantStockSnapshots[item.variantId] = {
-          currentStock: variant.stock,
-          requestedQty: qty,
-          name: variant.product.name,
-          size: variant.size,
-        };
+        const unitPrice =
+          paymentMethod === "INSTALLMENT" ? variant.installmentPrice : variant.cashPrice;
+
+        pricedItems.push({
+          variantId: variant.id,
+          quantity: item.quantity,
+          unitPrice,
+          totalPrice: calculateLineTotal(unitPrice, item.quantity),
+          reservedStock: variant.reservedStock,
+        });
       }
 
-      // 2. Generate unique order number
+      // 2. Calculate every persisted financial value from server-owned data.
+      const totalAmount = pricedItems.reduce(
+        (sum, item) => addMoney(sum, item.totalPrice),
+        0
+      );
+      const discountAmount = calculateServerDiscount();
+      const finalAmount = totalAmount - discountAmount;
+      const paidAmount = 0;
+      const remainingAmount = finalAmount;
+
+      // 3. Generate unique order number.
       const orderNumber = await generateOrderNumber(tx);
 
-      // 3. Create Order and OrderItems
+      // 4. Persist the authoritative price snapshot on the order and its items.
       const createdOrder = await tx.order.create({
         data: {
           orderNumber,
           customerId,
           sellerId: session.userId,
           totalAmount,
-          discountAmount: cleanDiscount,
+          discountAmount,
           finalAmount,
           paymentMethod,
           paidAmount,
@@ -147,40 +229,47 @@ export async function POST(req: NextRequest) {
           shippingAddress: shippingAddress || null,
           notes: notes || null,
           items: {
-            create: items.map((it) => ({
-              variantId: it.variantId,
-              quantity: Math.max(1, Math.round(Number(it.quantity))),
-              unitPrice: Math.round(Number(it.unitPrice)),
-              totalPrice: Math.round(Number(it.unitPrice)) * Math.max(1, Math.round(Number(it.quantity))),
+            create: pricedItems.map((item) => ({
+              variantId: item.variantId,
+              quantity: item.quantity,
+              unitPrice: item.unitPrice,
+              totalPrice: item.totalPrice,
             })),
           },
         },
         include: { items: true, customer: true },
       });
 
-      // 4. Atomically Deduct Stock and Record Inventory Movements (Auditability)
-      for (const item of items) {
-        const qty = Math.max(1, Math.round(Number(item.quantity)));
-        const snapshot = variantStockSnapshots[item.variantId];
-
-        const updatedVariant = await tx.productVariant.update({
-          where: { id: item.variantId },
+      // 5. Atomically deduct stock and record inventory movements.
+      for (const item of pricedItems) {
+        const updatedCount = await tx.productVariant.updateMany({
+          where: {
+            id: item.variantId,
+            isActive: true,
+            reservedStock: item.reservedStock,
+            stock: { gte: item.reservedStock + item.quantity },
+            product: { is: { isActive: true } },
+          },
           data: {
-            stock: { decrement: qty },
-            soldStock: { increment: qty },
+            stock: { decrement: item.quantity },
+            soldStock: { increment: item.quantity },
           },
         });
 
-        if (updatedVariant.stock < 0) {
-          throw new Error("خطای همزمانی در انبار: موجودی منفی شد.");
+        if (updatedCount.count !== 1) {
+          throw new OrderCreationError("موجودی کالا هم‌زمان تغییر کرده است؛ سفارش را دوباره بررسی کنید.");
         }
+
+        const updatedVariant = await tx.productVariant.findUniqueOrThrow({
+          where: { id: item.variantId },
+        });
 
         await tx.inventoryMovement.create({
           data: {
             variantId: item.variantId,
             type: "SALE",
-            quantity: qty,
-            previousStock: snapshot.currentStock,
+            quantity: item.quantity,
+            previousStock: updatedVariant.stock + item.quantity,
             newStock: updatedVariant.stock,
             reason: `فروش قطعی در فاکتور شماره ${orderNumber}`,
             userId: session.userId,
@@ -188,24 +277,9 @@ export async function POST(req: NextRequest) {
         });
       }
 
-      // 5. Record initial payment if provided (with unique idempotencyKey)
-      if (paidAmount > 0) {
-        await tx.payment.create({
-          data: {
-            idempotencyKey: `ORDER-INIT-${createdOrder.id}`,
-            orderId: createdOrder.id,
-            amount: paidAmount,
-            method: paymentMethod === "INSTALLMENT" ? "POS" : paymentMethod,
-            trackingNumber: `PAY-${Date.now().toString().slice(-6)}`,
-            status: "CONFIRMED",
-            notes: paymentMethod === "INSTALLMENT" ? "پیش‌پرداخت سفارش اقساطی" : "تسویه فاکتور",
-          },
-        });
-      }
-
-      // 6. Generate precise installments schedule with Jalali calendar months
+      // 6. Generate the installment schedule from the server-calculated balance.
       if (paymentMethod === "INSTALLMENT" && installmentCount > 0 && remainingAmount > 0) {
-        const count = Math.max(1, Math.round(installmentCount));
+        const count = installmentCount;
         const basePerInstallment = Math.floor(remainingAmount / count);
         const remainder = remainingAmount - basePerInstallment * count;
         const now = new Date();
@@ -228,7 +302,7 @@ export async function POST(req: NextRequest) {
       }
 
       return createdOrder;
-    });
+    }, WRITE_TRANSACTION_OPTIONS);
 
     await logAuditEvent({
       userId: session.userId,
@@ -239,13 +313,15 @@ export async function POST(req: NextRequest) {
     });
 
     return NextResponse.json({ success: true, order });
-  } catch (error: any) {
+  } catch (error: unknown) {
+    if (error instanceof OrderCreationAuthorizationError) {
+      return NextResponse.json({ error: error.message }, { status: 403 });
+    }
+    if (error instanceof OrderCreationError) {
+      return NextResponse.json({ error: error.message }, { status: 400 });
+    }
     console.error("Error creating order:", error);
-    const errorMessage = error?.message || "خطا در ثبت سفارش فرش";
-    return NextResponse.json(
-      { error: errorMessage.includes("موجودی") || errorMessage.includes("همزمانی") ? errorMessage : "خطا در ثبت سفارش فرش" },
-      { status: 400 }
-    );
+    return NextResponse.json({ error: "خطا در ثبت سفارش فرش" }, { status: 500 });
   }
 }
 
@@ -298,6 +374,8 @@ export async function DELETE(req: NextRequest) {
 
     // 2. Atomic transaction: Restore inventory stock, log RETURN movement, and delete order
     await prisma.$transaction(async (tx) => {
+      // Serialize duplicate deletion and payments before reading financial state.
+      if (!(await lockOrderForMutation(tx, id))) throw new Error("ORDER_NOT_FOUND");
       // Re-verify order inside transaction boundary
       const txOrder = await tx.order.findUnique({
         where: { id },
@@ -323,7 +401,11 @@ export async function DELETE(req: NextRequest) {
       }
 
       // Restore inventory for each item
-      for (const item of txOrder.items) {
+      for (const item of [...txOrder.items].sort((a, b) => a.variantId.localeCompare(b.variantId))) {
+        // Lock before reading: another order may restore this same variant.
+        if (!(await lockVariantForMutation(tx, item.variantId))) {
+          throw new Error("VARIANT_NOT_FOUND");
+        }
         const variant = await tx.productVariant.findUnique({
           where: { id: item.variantId },
         });
@@ -379,18 +461,26 @@ export async function DELETE(req: NextRequest) {
       await tx.order.delete({
         where: { id },
       });
-    });
+    }, WRITE_TRANSACTION_OPTIONS);
 
     return NextResponse.json({
       success: true,
       message: "سفارش با موفقیت حذف و موجودی اقلام به انبار بازگردانده شد.",
     });
-  } catch (error: any) {
-    console.error("Error deleting order:", error);
-    if (error?.message === "ORDER_NOT_FOUND") {
+  } catch (error: unknown) {
+    const errorMessage = error instanceof Error ? error.message : undefined;
+    const errorCode =
+      typeof error === "object" &&
+      error !== null &&
+      "code" in error &&
+      typeof error.code === "string"
+        ? error.code
+        : undefined;
+
+    if (errorMessage === "ORDER_NOT_FOUND" || errorCode === "P2025") {
       return NextResponse.json({ error: "سفارش مورد نظر یافت نشد." }, { status: 404 });
     }
-    if (error?.message === "PAID_ORDER_CANNOT_BE_DELETED") {
+    if (errorMessage === "PAID_ORDER_CANNOT_BE_DELETED") {
       return NextResponse.json(
         {
           error:
@@ -399,7 +489,7 @@ export async function DELETE(req: NextRequest) {
         { status: 400 }
       );
     }
+    console.error("Error deleting order:", error);
     return NextResponse.json({ error: "خطا در حذف سفارش و بازگردانی انبار" }, { status: 500 });
   }
 }
-

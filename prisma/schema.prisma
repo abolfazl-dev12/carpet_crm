@@ -136,16 +136,17 @@ enum AuditAction {
 }
 
 model User {
-  id           String      @id @default(cuid())
-  name         String
-  email        String      @unique
-  phone        String
-  passwordHash String
-  role         Role        @default(SALES_REP)
-  isActive     Boolean     @default(true)
-  avatar       String?
-  createdAt    DateTime    @default(now())
-  updatedAt    DateTime    @updatedAt
+  id             String   @id @default(cuid())
+  name           String
+  email          String   @unique
+  phone          String
+  passwordHash   String
+  sessionVersion Int      @default(0)
+  role           Role     @default(SALES_REP)
+  isActive       Boolean  @default(true)
+  avatar         String?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
 
   assignedLeads     Lead[]              @relation("AssignedLeads")
   assignedCustomers Customer[]          @relation("AssignedCustomers")
@@ -227,17 +228,17 @@ model Lead {
 
 model CarpetNeedProfile {
   id                  String            @id @default(cuid())
-  preferredSizes      String            // JSON array e.g. ["2x3", "3x4"]
-  preferredShane      String?           // e.g. "1200"
-  preferredDensity    String?           // e.g. "3600"
-  preferredColors     String            // JSON array e.g. ["سرمه‌ای", "کرم"]
-  preferredStyle      String?           // e.g. "کلاسیک", "مدرن", "وینتیج"
-  preferredCollection String?           // e.g. "اصفهان", "کاشان"
+  preferredSizes      Json // string[] e.g. ["2x3", "3x4"]
+  preferredShane      String? // e.g. "1200"
+  preferredDensity    String? // e.g. "3600"
+  preferredColors     Json // string[] e.g. ["سرمه‌ای", "کرم"]
+  preferredStyle      String? // e.g. "کلاسیک", "مدرن", "وینتیج"
+  preferredCollection String? // e.g. "اصفهان", "کاشان"
   budgetMin           Int?
   budgetMax           Int?
   quantity            Int               @default(1)
   paymentPreference   PaymentPreference @default(CASH)
-  spaceType           String?           // e.g. "پذیرایی", "اتاق خواب"
+  spaceType           String? // e.g. "پذیرایی", "اتاق خواب"
   notes               String?
   createdAt           DateTime          @default(now())
   updatedAt           DateTime          @updatedAt
@@ -253,16 +254,16 @@ model Product {
   id             String   @id @default(cuid())
   code           String   @unique
   name           String
-  pattern        String   // نقشه: افشان، شاه‌عباسی، ترنج، خشتی، شکارگاه
-  collection     String   // کلکسیون: اصفهان، کاشان، تبریز، نائین، مدرن طلاکوب
-  shane          Int      // شانه: 700, 1000, 1200, 1500
-  density        Int      // تراکم: 2550, 3000, 3600, 4500
+  pattern        String // نقشه: افشان، شاه‌عباسی، ترنج، خشتی، شکارگاه
+  collection     String // کلکسیون: اصفهان، کاشان، تبریز، نائین، مدرن طلاکوب
+  shane          Int // شانه: 700, 1000, 1200, 1500
+  density        Int // تراکم: 2550, 3000, 3600, 4500
   colorCount     Int      @default(8)
-  yarnMaterial   String   // جنس نخ: ۱۰۰٪ اکریلیک هیت‌ست شده، ابریشم بامبو
-  weavingMachine String   // دستگاه: شونهر آلمان، وندویل بلژیک
-  style          String   // سبک: کلاسیک، مدرن، وینتیج، نئوکلاسیک
-  primaryColor   String   // رنگ زمینه: سرمه‌ای، کرم، طوسی، گردویی، لاکی
-  images         String   // JSON array of image URLs
+  yarnMaterial   String // جنس نخ: ۱۰۰٪ اکریلیک هیت‌ست شده، ابریشم بامبو
+  weavingMachine String // دستگاه: شونهر آلمان، وندویل بلژیک
+  style          String // سبک: کلاسیک، مدرن، وینتیج، نئوکلاسیک
+  primaryColor   String // رنگ زمینه: سرمه‌ای، کرم، طوسی، گردویی، لاکی
+  images         Json // string[] of image URLs
   description    String?
   isActive       Boolean  @default(true)
   createdAt      DateTime @default(now())
@@ -279,19 +280,20 @@ model Product {
 }
 
 model ProductVariant {
-  id                String   @id @default(cuid())
-  productId         String
-  product           Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
-  sku               String   @unique
-  size              String   // e.g. "2x3", "2.5x3.5", "3x4", "1.5x2.25", "1x1.5", "1x3"
-  areaSquareMeters  Float
-  cashPrice         Int
-  installmentPrice  Int
-  stock             Int      @default(0)
-  reservedStock     Int      @default(0)
-  soldStock         Int      @default(0)
-  createdAt         DateTime @default(now())
-  updatedAt         DateTime @updatedAt
+  id               String   @id @default(cuid())
+  productId        String
+  product          Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+  sku              String   @unique
+  size             String // e.g. "2x3", "2.5x3.5", "3x4", "1.5x2.25", "1x1.5", "1x3"
+  areaSquareMeters Float
+  cashPrice        Int
+  installmentPrice Int
+  isActive         Boolean  @default(true)
+  stock            Int      @default(0)
+  reservedStock    Int      @default(0)
+  soldStock        Int      @default(0)
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
 
   inventoryLogs InventoryMovement[]
   orderItems    OrderItem[]
@@ -299,6 +301,7 @@ model ProductVariant {
 
   @@index([sku])
   @@index([size])
+  @@index([isActive])
 }
 
 model InventoryMovement {
@@ -482,9 +485,9 @@ model Notification {
 model AutomationRule {
   id          String   @id @default(cuid())
   name        String
-  triggerType String   // e.g. "HOT_LEAD", "STAGE_WON", "INSTALLMENT_DUE", "INACTIVE_48H"
-  conditions  String   // JSON string
-  actions     String   // JSON string
+  triggerType String // e.g. "HOT_LEAD", "STAGE_WON", "INSTALLMENT_DUE", "INACTIVE_48H"
+  conditions  Json
+  actions     Json
   isActive    Boolean  @default(true)
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
@@ -497,7 +500,7 @@ model AuditLog {
   action    AuditAction
   entity    String
   entityId  String?
-  details   String?     // JSON details
+  details   Json?
   ipAddress String?
   userAgent String?
   createdAt DateTime    @default(now())
@@ -505,4 +508,14 @@ model AuditLog {
   @@index([entity, entityId])
   @@index([userId])
   @@index([createdAt])
+}
+
+model AuthRateLimit {
+  key       String   @id
+  attempts  Int      @default(0)
+  resetAt   DateTime
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([resetAt])
 }

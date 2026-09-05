@@ -62,7 +62,8 @@ The database layer is modeled with strict relational integrity, composite unique
 
 #### Order & OrderItem (فاکتورهای فروش)
 - **Order:** `orderNumber` (Unique), `totalAmount` (Int), `discountAmount` (Int), `taxAmount` (Int), `finalAmount` (Int), `paidAmount` (Int), `remainingAmount` (Int), `paymentMethod` (Enum), `status` (Enum), `customerId` (FK, Indexed), `sellerId` (FK, Indexed), `createdAt` (Indexed)
-- **OrderItem:** `orderId` (FK, Cascade), `variantId` (FK, Restrict), `quantity` (Int), `unitPrice` (Int), `totalPrice` (Int)
+- **ProductVariant:** قیمت‌های نقدی و اقساطی، موجودی و `isActive` برای جلوگیری از فروش تنوع غیرفعال
+- **OrderItem:** `orderId` (FK, Cascade), `variantId` (FK, Restrict), `quantity` (Int), و snapshotهای server-side شامل `unitPrice` و `totalPrice`
 
 #### Payment (تراکنش‌های مالی و دفتر پرداخت)
 - `id` (String / CUID)
@@ -105,9 +106,11 @@ The database layer is modeled with strict relational integrity, composite unique
 ## 4. Production Migration Strategy
 ```bash
 # Apply version-controlled migrations safely:
-npx prisma migrate deploy
+npm run prisma:migrate:production
 
 # Verify schema and generate client:
-npx prisma validate
-npx prisma generate
+npm run prisma:validate:postgresql
+npm run prisma:generate:postgresql
 ```
+
+مسیر production اکنون PostgreSQL و دارای schema/history مستقل در `prisma/postgresql/` است. تاریخچهٔ SQLite را روی PostgreSQL اجرا نکنید. راهنمای انتقال داده، conversion JSON و rollback در [راهنمای مهاجرت PostgreSQL](./postgresql-migration.md) آمده است.

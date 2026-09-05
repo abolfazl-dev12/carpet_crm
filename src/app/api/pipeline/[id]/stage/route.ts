@@ -1,8 +1,17 @@
 import { NextRequest, NextResponse } from "next/server";
 import prisma from "@/lib/prisma";
 import { getSessionFromRequest } from "@/lib/auth";
+import {
+  canAccessOwners,
+  canMutateCrm,
+  checkRelatedResourceAccess,
+  getDealScope,
+  getLeadScope,
+} from "@/lib/authorization";
 import { logAuditEvent } from "@/lib/audit";
 import { dealStageUpdateSchema } from "@/lib/validations/schemas";
+
+class DealStageAuthorizationError extends Error {}
 
 export async function PUT(
   req: NextRequest,
@@ -11,6 +20,9 @@ export async function PUT(
   try {
     const session = await getSessionFromRequest(req);
     if (!session) return NextResponse.json({ error: "عدم احراز هویت" }, { status: 401 });
+    if (!canMutateCrm(session)) {
+      return NextResponse.json({ error: "نقش فقط‌خواندنی مجاز به تغییر مرحله معامله نیست." }, { status: 403 });
+    }
 
     const { id } = await params;
     const rawBody = await req.json().catch(() => null);
@@ -31,14 +43,27 @@ export async function PUT(
     }
 
     // Server-side RBAC: Sales reps can only update stages for their assigned deals
-    if (session.role === "SALES_REP" && currentDeal.assignedToId !== session.userId) {
+    const relatedAccess = await checkRelatedResourceAccess(session, currentDeal);
+    if (
+      !canAccessOwners(session, [currentDeal.assignedToId]) ||
+      relatedAccess !== "ALLOWED"
+    ) {
       return NextResponse.json({ error: "عدم دسترسی برای تغییر مرحله این معامله" }, { status: 403 });
     }
 
     // Use Prisma transaction for atomic deal stage and linked lead status update
     const updatedDeal = await prisma.$transaction(async (tx) => {
+      const txCurrentDeal = await tx.deal.findFirst({
+        where: { ...getDealScope(session), id },
+      });
+      if (!txCurrentDeal) {
+        throw new DealStageAuthorizationError(
+          "عدم دسترسی برای تغییر مرحله این معامله"
+        );
+      }
+
       const deal = await tx.deal.update({
-        where: { id },
+        where: { ...getDealScope(session), id },
         data: {
           stage,
           lostReason: stage === "LOST" ? lostReason : null,
@@ -47,11 +72,16 @@ export async function PUT(
       });
 
       // If deal has a linked lead, synchronize lead status atomically
-      if (currentDeal.leadId) {
-        await tx.lead.update({
-          where: { id: currentDeal.leadId },
+      if (txCurrentDeal.leadId) {
+        const updatedLead = await tx.lead.updateMany({
+          where: { id: txCurrentDeal.leadId, ...getLeadScope(session) },
           data: { status: stage, lastActivityAt: new Date() },
         });
+        if (updatedLead.count !== 1) {
+          throw new DealStageAuthorizationError(
+            "عدم دسترسی برای تغییر سرنخ مرتبط با معامله"
+          );
+        }
       }
 
       return deal;
@@ -66,7 +96,10 @@ export async function PUT(
     });
 
     return NextResponse.json({ success: true, deal: updatedDeal });
-  } catch (error: any) {
+  } catch (error: unknown) {
+    if (error instanceof DealStageAuthorizationError) {
+      return NextResponse.json({ error: error.message }, { status: 403 });
+    }
     console.error("Error updating deal stage:", error);
     return NextResponse.json({ error: "خطا در تغییر مرحله معامله" }, { status: 500 });
   }

@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
+import type { Prisma } from "@prisma/client";
 import prisma from "@/lib/prisma";
 import { getSessionFromRequest } from "@/lib/auth";
+import { getCustomerScope, getLeadScope } from "@/lib/authorization";
 import { normalizeIranianPhone } from "@/lib/persian";
 
 export async function GET(req: NextRequest) {
@@ -17,7 +19,8 @@ export async function GET(req: NextRequest) {
 
     const normalizedPhone = normalizeIranianPhone(q);
 
-    const customerWhere: any = {
+    const customerWhere: Prisma.CustomerWhereInput = {
+      ...getCustomerScope(session),
       OR: [
         { firstName: { contains: q } },
         { lastName: { contains: q } },
@@ -27,7 +30,8 @@ export async function GET(req: NextRequest) {
       ],
     };
 
-    const leadWhere: any = {
+    const leadWhere: Prisma.LeadWhereInput = {
+      ...getLeadScope(session),
       OR: [
         { firstName: { contains: q } },
         { lastName: { contains: q } },
@@ -35,12 +39,6 @@ export async function GET(req: NextRequest) {
         { city: { contains: q } },
       ],
     };
-
-    // Server-side RBAC: Sales reps only see their assigned records in search
-    if (session.role === "SALES_REP") {
-      customerWhere.assignedToId = session.userId;
-      leadWhere.assignedToId = session.userId;
-    }
 
     // Search Customers
     const customers = await prisma.customer.findMany({

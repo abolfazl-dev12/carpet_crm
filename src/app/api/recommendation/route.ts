@@ -1,9 +1,15 @@
 import { NextRequest, NextResponse } from "next/server";
 import prisma from "@/lib/prisma";
+import { getSessionFromRequest } from "@/lib/auth";
 import { recommendCarpets } from "@/lib/recommendation";
 
 export async function POST(req: NextRequest) {
   try {
+    const session = await getSessionFromRequest(req);
+    if (!session) {
+      return NextResponse.json({ error: "عدم احراز هویت" }, { status: 401 });
+    }
+
     const body = await req.json();
     const {
       preferredSizes = [],
@@ -20,7 +26,7 @@ export async function POST(req: NextRequest) {
     const products = await prisma.product.findMany({
       where: { isActive: true },
       include: {
-        variants: true,
+        variants: { where: { isActive: true } },
       },
     });
 
@@ -35,7 +41,7 @@ export async function POST(req: NextRequest) {
         budgetMax: budgetMax ? Number(budgetMax) : null,
         paymentPreference,
       },
-      products as any
+      products
     );
 
     return NextResponse.json({

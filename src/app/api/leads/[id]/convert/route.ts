@@ -1,8 +1,15 @@
 import { NextRequest, NextResponse } from "next/server";
 import prisma from "@/lib/prisma";
 import { getSessionFromRequest } from "@/lib/auth";
+import {
+  canAccessOwners,
+  canMutateCrm,
+  getDealScope,
+  getLeadScope,
+} from "@/lib/authorization";
 import { logAuditEvent } from "@/lib/audit";
 import { generateCustomerCode } from "@/lib/generators";
+import { readStringArray } from "@/lib/json-fields";
 
 export async function POST(
   req: NextRequest,
@@ -11,24 +18,33 @@ export async function POST(
   try {
     const session = await getSessionFromRequest(req);
     if (!session) return NextResponse.json({ error: "عدم احراز هویت" }, { status: 401 });
+    if (!canMutateCrm(session)) {
+      return NextResponse.json({ error: "نقش فقط‌خواندنی مجاز به تبدیل سرنخ نیست." }, { status: 403 });
+    }
 
     const { id } = await params;
     const lead = await prisma.lead.findUnique({
       where: { id },
-      include: { needProfile: true },
+      include: {
+        needProfile: true,
+        convertedToCustomer: { select: { assignedToId: true } },
+      },
     });
 
     if (!lead) return NextResponse.json({ error: "سرنخ یافت نشد" }, { status: 404 });
 
     // Server-side RBAC: Sales reps can only convert their own assigned leads
-    if (session.role === "SALES_REP" && lead.assignedToId !== session.userId) {
+    if (!canAccessOwners(session, [lead.assignedToId])) {
       return NextResponse.json({ error: "عدم دسترسی برای تبدیل این سرنخ" }, { status: 403 });
     }
 
     if (lead.convertedToCustomerId) {
+      const canReadConvertedCustomer = canAccessOwners(session, [
+        lead.convertedToCustomer?.assignedToId ?? null,
+      ]);
       return NextResponse.json({
         error: "این سرنخ قبلاً به مشتری تبدیل شده است.",
-        customerId: lead.convertedToCustomerId,
+        ...(canReadConvertedCustomer ? { customerId: lead.convertedToCustomerId } : {}),
       });
     }
 
@@ -51,10 +67,10 @@ export async function POST(
           needProfiles: lead.needProfile
             ? {
                 create: {
-                  preferredSizes: lead.needProfile.preferredSizes,
+                  preferredSizes: readStringArray(lead.needProfile.preferredSizes),
                   preferredShane: lead.needProfile.preferredShane,
                   preferredDensity: lead.needProfile.preferredDensity,
-                  preferredColors: lead.needProfile.preferredColors,
+                  preferredColors: readStringArray(lead.needProfile.preferredColors),
                   preferredStyle: lead.needProfile.preferredStyle,
                   preferredCollection: lead.needProfile.preferredCollection,
                   budgetMin: lead.needProfile.budgetMin,
@@ -71,7 +87,7 @@ export async function POST(
 
       // Update Lead status to WON and link customer
       await tx.lead.update({
-        where: { id },
+        where: { ...getLeadScope(session), id },
         data: {
           status: "WON",
           convertedToCustomerId: createdCustomer.id,
@@ -80,7 +96,7 @@ export async function POST(
 
       // Link any existing deals
       await tx.deal.updateMany({
-        where: { leadId: id },
+        where: { leadId: id, ...getDealScope(session) },
         data: { customerId: createdCustomer.id, stage: "WON" },
       });
 

@@ -1,6 +1,15 @@
 import { NextRequest, NextResponse } from "next/server";
+import type { Prisma } from "@prisma/client";
 import prisma from "@/lib/prisma";
+import { PUBLIC_USER_SELECT } from "@/lib/public-user";
 import { getSessionFromRequest } from "@/lib/auth";
+import {
+  canMutateCrm,
+  getCustomerScope,
+  getDealScope,
+  getFollowUpScope,
+  getOrderScope,
+} from "@/lib/authorization";
 import { normalizeIranianPhone, isValidIranianMobile } from "@/lib/persian";
 import { logAuditEvent } from "@/lib/audit";
 import { customerCreateSchema } from "@/lib/validations/schemas";
@@ -19,12 +28,10 @@ export async function GET(req: NextRequest) {
     const segmentFilter = searchParams.get("segment")?.trim() || "";
     const sortBy = searchParams.get("sort")?.trim() || "score_desc";
 
-    const whereClause: any = {};
+    const whereClause: Prisma.CustomerWhereInput = getCustomerScope(session);
 
     // Enforce server-side RBAC: Sales Reps only see their assigned customers
-    if (session.role === "SALES_REP") {
-      whereClause.assignedToId = session.userId;
-    } else if (repId) {
+    if (session.role !== "SALES_REP" && repId) {
       whereClause.assignedToId = repId;
     }
 
@@ -46,16 +53,25 @@ export async function GET(req: NextRequest) {
         assignedTo: { select: { id: true, name: true, avatar: true } },
         needProfiles: true,
         orders: {
+          where: getOrderScope(session),
           include: { installments: true },
           orderBy: { createdAt: "desc" },
         },
         deals: {
+          where: getDealScope(session),
           orderBy: { updatedAt: "desc" },
         },
         followUps: {
+          where: getFollowUpScope(session),
           orderBy: { scheduledAt: "desc" },
         },
-        _count: { select: { orders: true, deals: true, followUps: true } },
+        _count: {
+          select: {
+            orders: { where: getOrderScope(session) },
+            deals: { where: getDealScope(session) },
+            followUps: { where: getFollowUpScope(session) },
+          },
+        },
       },
       orderBy: { createdAt: "desc" },
     });
@@ -98,6 +114,9 @@ export async function POST(req: NextRequest) {
   try {
     const session = await getSessionFromRequest(req);
     if (!session) return NextResponse.json({ error: "عدم احراز هویت" }, { status: 401 });
+    if (!canMutateCrm(session)) {
+      return NextResponse.json({ error: "نقش فقط‌خواندنی مجاز به ثبت مشتری نیست." }, { status: 403 });
+    }
 
     const rawBody = await req.json().catch(() => null);
     const parsed = customerCreateSchema.safeParse(rawBody);
@@ -166,10 +185,10 @@ export async function POST(req: NextRequest) {
           assignedToId: targetRepId,
           needProfiles: {
             create: {
-              preferredSizes: JSON.stringify(preferredSizes || ["3x4"]),
+              preferredSizes: preferredSizes || ["3x4"],
               preferredShane: preferredShane || null,
               preferredDensity: preferredDensity || null,
-              preferredColors: JSON.stringify(preferredColors || ["سرمه‌ای"]),
+              preferredColors: preferredColors || ["سرمه‌ای"],
               preferredStyle: preferredStyle || null,
               preferredCollection: preferredCollection || null,
               budgetMin: budgetMin !== undefined && budgetMin !== null ? Math.round(budgetMin) : null,
@@ -180,7 +199,7 @@ export async function POST(req: NextRequest) {
             },
           },
         },
-        include: { needProfiles: true, assignedTo: true },
+        include: { needProfiles: true, assignedTo: { select: PUBLIC_USER_SELECT } },
       });
     });
 

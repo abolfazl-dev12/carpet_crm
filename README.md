@@ -54,14 +54,12 @@
 
 ---
 
-## 👥 حساب‌های کاربری پیش‌فرض دمو (Demo Credentials)
+## 👥 حساب‌های آزمایشی
 
-| نقش کاربری | نام و سمت | ایمیل / نام کاربری | رمز عبور |
-|---|---|---|---|
-| **مدیر ارشد سیستم** | مهندس علیرضا کاشانی | `admin@carpet-crm.ir` | `123456` |
-| **مدیر فروش** | سارا حسینی | `manager@carpet-crm.ir` | `123456` |
-| **کارشناس ارشد فرش** | محمد رضایی | `rep1@carpet-crm.ir` | `123456` |
-| **مشاور دکوراسیون** | مریم ابراهیمی | `rep2@carpet-crm.ir` | `123456` |
+اسکریپت seed فقط داده‌های ساختگی ایجاد می‌کند و هیچ رمز پیش‌فرضی در مخزن وجود ندارد.
+پیش از اجرای seed باید `SEED_DEFAULT_PASSWORD` را با یک رمز محلی و منحصربه‌فرد حداقل ۱۲ نویسه‌ای در فایل `.env` تنظیم کنید. این رمز یا هر credential واقعی دیگری را commit نکنید.
+
+> هشدار: seed همهٔ رکوردهای دیتابیس هدف را حذف و داده‌های آزمایشی را جایگزین می‌کند. هرگز `npm run prisma:seed:sqlite` را روی دیتابیس production اجرا نکنید. `db:setup` نیز فقط migration مسیر توسعهٔ SQLite است و دستور production نیست.
 
 ---
 
@@ -72,8 +70,13 @@
 # نصب وابستگی‌ها
 npm install --legacy-peer-deps
 
-# آماده‌سازی اولیه دیتابیس و داده‌های نمونه
+# فایل .env.example را به .env کپی و مقادیر JWT_SECRET و SEED_DEFAULT_PASSWORD را فقط به‌صورت محلی تنظیم کنید.
+
+# آماده‌سازی schema دیتابیس SQLite با migrationها (بدون seed)
 npm run db:setup
+
+# اختیاری و فقط برای دیتابیس disposable؛ تمام داده‌ها را جایگزین می‌کند
+npm run prisma:seed:sqlite
 
 # اجرای سرور توسعه
 npm run dev
@@ -83,10 +86,10 @@ npm run dev
 در محیط عملیاتی پروداکشن، پایگاه داده با سیستم مایگریشن رسمی و ورژن‌بندی‌شده هدایت می‌شود:
 ```bash
 # اعمال مایگریشن‌های دیتابیس به صورت ایمن
-npx prisma migrate deploy
+npm run prisma:migrate:production
 
 # تولید کلاینت پریزما
-npx prisma generate
+npm run prisma:generate:postgresql
 
 # بیلد نهایی برنامه
 npm run build
@@ -99,6 +102,10 @@ npm start
 
 ## 🧪 اجرای تست‌های خودکار و ارزیابی یکپارچگی (Test Suite)
 ```bash
-npx tsx scripts/verify-all.ts
+npm run test:integration
 ```
-این دستور کلیه آزمون‌های واقعی دیتابیس (P2002، انبارداری، محاسبات مالی، همزمانی و لید اسکورینگ) را اجرا می‌کند.
+این دستور آزمون‌ها را روی یک SQLite موقت و ایزوله اجرا می‌کند و دیتابیس کاری را تغییر نمی‌دهد.
+
+برای سیاست نگهداری secrets، دیتابیس‌ها و خروجی‌های دارای اطلاعات مشتری به [راهنمای امنیت مخزن](docs/repository-security.md) مراجعه کنید.
+
+production فقط از PostgreSQL استفاده می‌کند. schema، روش انتقال دادهٔ SQLite، conversion فیلدهای JSON و rollback در [راهنمای مهاجرت PostgreSQL](docs/postgresql-migration.md) مستند شده است؛ `prisma db push` بخشی از workflow پروژه نیست.

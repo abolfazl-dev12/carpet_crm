@@ -1,6 +1,16 @@
 import { NextRequest, NextResponse } from "next/server";
 import prisma from "@/lib/prisma";
+import { PUBLIC_USER_SELECT } from "@/lib/public-user";
 import { getSessionFromRequest } from "@/lib/auth";
+import {
+  canAccessOwners,
+  canMutateCrm,
+  getDealScope,
+  getFollowUpScope,
+  getLeadScope,
+  hasAllowedRole,
+  MANAGEMENT_ROLES,
+} from "@/lib/authorization";
 import { calculateTemperature } from "@/lib/scoring";
 import { logAuditEvent } from "@/lib/audit";
 import { leadUpdateSchema } from "@/lib/validations/schemas";
@@ -20,8 +30,14 @@ export async function GET(
       include: {
         needProfile: true,
         assignedTo: { select: { id: true, name: true, phone: true, avatar: true } },
-        deals: { include: { product: true, variant: true } },
-        followUps: { orderBy: { scheduledAt: "desc" } },
+        deals: {
+          where: getDealScope(session),
+          include: { product: true, variant: true },
+        },
+        followUps: {
+          where: getFollowUpScope(session),
+          orderBy: { scheduledAt: "desc" },
+        },
         convertedToCustomer: true,
       },
     });
@@ -29,11 +45,18 @@ export async function GET(
     if (!lead) return NextResponse.json({ error: "سرنخ یافت نشد" }, { status: 404 });
 
     // Server-side RBAC check: Sales reps can only view their own assigned leads
-    if (session.role === "SALES_REP" && lead.assignedToId !== session.userId) {
+    if (!canAccessOwners(session, [lead.assignedToId])) {
       return NextResponse.json({ error: "عدم دسترسی به این سرنخ" }, { status: 403 });
     }
 
-    return NextResponse.json({ lead });
+    const visibleLead =
+      session.role === "SALES_REP" &&
+      lead.convertedToCustomer &&
+      lead.convertedToCustomer.assignedToId !== session.userId
+        ? { ...lead, convertedToCustomer: null }
+        : lead;
+
+    return NextResponse.json({ lead: visibleLead });
   } catch (error: any) {
     console.error("Error fetching lead:", error);
     return NextResponse.json({ error: "خطا در دریافت سرنخ" }, { status: 500 });
@@ -47,6 +70,9 @@ export async function PUT(
   try {
     const session = await getSessionFromRequest(req);
     if (!session) return NextResponse.json({ error: "عدم احراز هویت" }, { status: 401 });
+    if (!canMutateCrm(session)) {
+      return NextResponse.json({ error: "نقش فقط‌خواندنی مجاز به ویرایش سرنخ نیست." }, { status: 403 });
+    }
 
     const { id } = await params;
     const rawBody = await req.json().catch(() => null);
@@ -63,10 +89,8 @@ export async function PUT(
     if (!currentLead) return NextResponse.json({ error: "سرنخ یافت نشد" }, { status: 404 });
 
     // Server-side RBAC: Sales reps can only update their own leads and cannot reassign
-    if (session.role === "SALES_REP") {
-      if (currentLead.assignedToId !== session.userId) {
-        return NextResponse.json({ error: "عدم دسترسی برای ویرایش این سرنخ" }, { status: 403 });
-      }
+    if (!canAccessOwners(session, [currentLead.assignedToId])) {
+      return NextResponse.json({ error: "عدم دسترسی برای ویرایش این سرنخ" }, { status: 403 });
     }
 
     const {
@@ -122,7 +146,7 @@ export async function PUT(
     // Use Prisma transaction for atomic lead and need profile update
     const updatedLead = await prisma.$transaction(async (tx) => {
       const updated = await tx.lead.update({
-        where: { id },
+        where: { ...getLeadScope(session), id },
         data: {
           firstName,
           lastName,
@@ -141,7 +165,7 @@ export async function PUT(
           assignedToId: targetAssignedToId,
           lastActivityAt: new Date(),
         },
-        include: { needProfile: true, assignedTo: true },
+        include: { needProfile: true, assignedTo: { select: PUBLIC_USER_SELECT } },
       });
 
       if (preferredSizes || preferredShane || preferredColors || preferredStyle || preferredDensity) {
@@ -149,20 +173,20 @@ export async function PUT(
           where: { leadId: id },
           create: {
             leadId: id,
-            preferredSizes: JSON.stringify(preferredSizes || ["3x4"]),
+            preferredSizes: preferredSizes || ["3x4"],
             preferredShane,
             preferredDensity,
-            preferredColors: JSON.stringify(preferredColors || ["سرمه‌ای"]),
+            preferredColors: preferredColors || ["سرمه‌ای"],
             preferredStyle,
             preferredCollection,
             paymentPreference: paymentPreference || "CASH",
             spaceType,
           },
           update: {
-            preferredSizes: preferredSizes ? JSON.stringify(preferredSizes) : undefined,
+            preferredSizes: preferredSizes || undefined,
             preferredShane,
             preferredDensity,
-            preferredColors: preferredColors ? JSON.stringify(preferredColors) : undefined,
+            preferredColors: preferredColors || undefined,
             preferredStyle,
             preferredCollection,
             paymentPreference,
@@ -195,7 +219,8 @@ export async function DELETE(
 ) {
   try {
     const session = await getSessionFromRequest(req);
-    if (!session || (session.role !== "ADMIN" && session.role !== "SALES_MANAGER")) {
+    if (!session) return NextResponse.json({ error: "عدم احراز هویت" }, { status: 401 });
+    if (!hasAllowedRole(session, MANAGEMENT_ROLES)) {
       return NextResponse.json({ error: "عدم دسترسی کافی برای حذف" }, { status: 403 });
     }
 

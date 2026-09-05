@@ -1,0 +1,523 @@
+datasource db {
+  provider = "sqlite"
+  url      = env("SQLITE_DATABASE_URL")
+}
+
+// Read-only compatibility client for the original string-encoded JSON schema.
+generator client {
+  provider = "prisma-client-js"
+  output   = "../generated/sqlite-source-client"
+}
+
+enum Role {
+  ADMIN
+  SALES_MANAGER
+  SALES_REP
+  VIEWER
+}
+
+enum LeadSource {
+  INSTAGRAM
+  WHATSAPP
+  TELEGRAM
+  WEBSITE
+  CALL
+  SMS
+  ADS
+  REFERRAL
+  STORE
+  OTHER
+}
+
+enum LeadStatus {
+  NEW
+  CONTACTED
+  QUALIFIED
+  NEEDS_ASSESSMENT
+  PROPOSAL_SENT
+  NEGOTIATION
+  DECISION_PENDING
+  WON
+  LOST
+  FUTURE_FOLLOWUP
+}
+
+enum LeadTemperature {
+  HOT
+  WARM
+  COLD
+  UNQUALIFIED
+}
+
+enum FollowUpType {
+  CALL
+  WHATSAPP
+  SMS
+  SEND_CARPET_PHOTO
+  SEND_PRICE
+  SEND_CATALOG
+  NEGOTIATION
+  PAYMENT_REMINDER
+  IN_PERSON_VISIT
+  OTHER
+}
+
+enum Priority {
+  LOW
+  MEDIUM
+  HIGH
+  URGENT
+}
+
+enum FollowUpStatus {
+  PENDING
+  DONE
+  CANCELLED
+  OVERDUE
+}
+
+enum PaymentPreference {
+  CASH
+  INSTALLMENT
+  HYBRID
+}
+
+enum InventoryMovementType {
+  PURCHASE
+  RESERVATION
+  RELEASE_RESERVATION
+  SALE
+  RETURN
+  ADJUSTMENT
+}
+
+enum OrderStatus {
+  DRAFT
+  CONFIRMED
+  PAID
+  COMPLETED
+  CANCELLED
+}
+
+enum PaymentMethod {
+  CASH
+  POS
+  CARD_TO_CARD
+  CHEQUE
+  ONLINE
+  INSTALLMENT
+}
+
+enum InstallmentStatus {
+  PENDING
+  PAID
+  OVERDUE
+  CANCELLED
+}
+
+enum NotificationType {
+  LEAD_ASSIGNED
+  HOT_LEAD
+  FOLLOWUP_REMINDER
+  OVERDUE_ALERT
+  PAYMENT_DUE
+  LOW_STOCK
+  ORDER_CONFIRMED
+  STAGE_CHANGE
+}
+
+enum AuditAction {
+  LOGIN
+  LOGOUT
+  CREATE
+  UPDATE
+  DELETE
+  STATUS_CHANGE
+  ASSIGNMENT
+  EXPORT
+}
+
+model User {
+  id             String   @id @default(cuid())
+  name           String
+  email          String   @unique
+  phone          String
+  passwordHash   String
+  sessionVersion Int      @default(0)
+  role           Role     @default(SALES_REP)
+  isActive       Boolean  @default(true)
+  avatar         String?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  assignedLeads     Lead[]              @relation("AssignedLeads")
+  assignedCustomers Customer[]          @relation("AssignedCustomers")
+  assignedDeals     Deal[]              @relation("AssignedDeals")
+  followUps         FollowUp[]          @relation("AssignedFollowUps")
+  orders            Order[]             @relation("SellerOrders")
+  inventoryLogs     InventoryMovement[]
+  auditLogs         AuditLog[]
+  notifications     Notification[]
+}
+
+model Customer {
+  id          String   @id @default(cuid())
+  code        String   @unique
+  firstName   String
+  lastName    String
+  phone       String
+  secondPhone String?
+  province    String
+  city        String
+  address     String?
+  postalCode  String?
+  notes       String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  assignedToId String?
+  assignedTo   User?   @relation("AssignedCustomers", fields: [assignedToId], references: [id])
+
+  leads        Lead[]
+  needProfiles CarpetNeedProfile[]
+  deals        Deal[]
+  orders       Order[]
+  followUps    FollowUp[]
+
+  @@index([phone])
+  @@index([province, city])
+  @@index([assignedToId])
+  @@index([createdAt])
+}
+
+model Lead {
+  id                String          @id @default(cuid())
+  firstName         String
+  lastName          String
+  phone             String
+  secondPhone       String?
+  province          String
+  city              String
+  source            LeadSource      @default(INSTAGRAM)
+  campaign          String?
+  status            LeadStatus      @default(NEW)
+  score             Int             @default(10)
+  temperature       LeadTemperature @default(COLD)
+  estimatedBudget   Int?
+  purchaseTimeframe String?
+  notes             String?
+  createdAt         DateTime        @default(now())
+  updatedAt         DateTime        @updatedAt
+  lastActivityAt    DateTime        @default(now())
+
+  assignedToId String?
+  assignedTo   User?   @relation("AssignedLeads", fields: [assignedToId], references: [id])
+
+  convertedToCustomerId String?
+  convertedToCustomer   Customer? @relation(fields: [convertedToCustomerId], references: [id])
+
+  needProfile CarpetNeedProfile?
+  deals       Deal[]
+  followUps   FollowUp[]
+
+  @@index([phone])
+  @@index([status])
+  @@index([temperature])
+  @@index([source])
+  @@index([assignedToId])
+  @@index([createdAt])
+}
+
+model CarpetNeedProfile {
+  id                  String            @id @default(cuid())
+  preferredSizes      String // legacy JSON string
+  preferredShane      String? // e.g. "1200"
+  preferredDensity    String? // e.g. "3600"
+  preferredColors     String // legacy JSON string
+  preferredStyle      String? // e.g. "کلاسیک", "مدرن", "وینتیج"
+  preferredCollection String? // e.g. "اصفهان", "کاشان"
+  budgetMin           Int?
+  budgetMax           Int?
+  quantity            Int               @default(1)
+  paymentPreference   PaymentPreference @default(CASH)
+  spaceType           String? // e.g. "پذیرایی", "اتاق خواب"
+  notes               String?
+  createdAt           DateTime          @default(now())
+  updatedAt           DateTime          @updatedAt
+
+  customerId String?   @unique
+  customer   Customer? @relation(fields: [customerId], references: [id], onDelete: Cascade)
+
+  leadId String? @unique
+  lead   Lead?   @relation(fields: [leadId], references: [id], onDelete: Cascade)
+}
+
+model Product {
+  id             String   @id @default(cuid())
+  code           String   @unique
+  name           String
+  pattern        String // نقشه: افشان، شاه‌عباسی، ترنج، خشتی، شکارگاه
+  collection     String // کلکسیون: اصفهان، کاشان، تبریز، نائین، مدرن طلاکوب
+  shane          Int // شانه: 700, 1000, 1200, 1500
+  density        Int // تراکم: 2550, 3000, 3600, 4500
+  colorCount     Int      @default(8)
+  yarnMaterial   String // جنس نخ: ۱۰۰٪ اکریلیک هیت‌ست شده، ابریشم بامبو
+  weavingMachine String // دستگاه: شونهر آلمان، وندویل بلژیک
+  style          String // سبک: کلاسیک، مدرن، وینتیج، نئوکلاسیک
+  primaryColor   String // رنگ زمینه: سرمه‌ای، کرم، طوسی، گردویی، لاکی
+  images         String // legacy JSON string
+  description    String?
+  isActive       Boolean  @default(true)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  variants ProductVariant[]
+  deals    Deal[]
+
+  @@index([code])
+  @@index([pattern])
+  @@index([collection])
+  @@index([shane])
+  @@index([primaryColor])
+}
+
+model ProductVariant {
+  id               String   @id @default(cuid())
+  productId        String
+  product          Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+  sku              String   @unique
+  size             String // e.g. "2x3", "2.5x3.5", "3x4", "1.5x2.25", "1x1.5", "1x3"
+  areaSquareMeters Float
+  cashPrice        Int
+  installmentPrice Int
+  isActive         Boolean  @default(true)
+  stock            Int      @default(0)
+  reservedStock    Int      @default(0)
+  soldStock        Int      @default(0)
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  inventoryLogs InventoryMovement[]
+  orderItems    OrderItem[]
+  deals         Deal[]
+
+  @@index([sku])
+  @@index([size])
+  @@index([isActive])
+}
+
+model InventoryMovement {
+  id            String                @id @default(cuid())
+  variantId     String
+  variant       ProductVariant        @relation(fields: [variantId], references: [id], onDelete: Cascade)
+  type          InventoryMovementType
+  quantity      Int
+  previousStock Int
+  newStock      Int
+  reason        String
+  userId        String?
+  user          User?                 @relation(fields: [userId], references: [id])
+  createdAt     DateTime              @default(now())
+
+  @@index([variantId])
+  @@index([type])
+  @@index([createdAt])
+  @@index([userId])
+}
+
+model Deal {
+  id                String     @id @default(cuid())
+  title             String
+  value             Int        @default(0)
+  stage             LeadStatus @default(NEW)
+  priority          Priority   @default(MEDIUM)
+  expectedCloseDate DateTime?
+  lostReason        String?
+  notes             String?
+  createdAt         DateTime   @default(now())
+  updatedAt         DateTime   @updatedAt
+
+  leadId String?
+  lead   Lead?   @relation(fields: [leadId], references: [id], onDelete: Cascade)
+
+  customerId String?
+  customer   Customer? @relation(fields: [customerId], references: [id], onDelete: Cascade)
+
+  productId String?
+  product   Product? @relation(fields: [productId], references: [id])
+
+  variantId String?
+  variant   ProductVariant? @relation(fields: [variantId], references: [id])
+
+  assignedToId String?
+  assignedTo   User?   @relation("AssignedDeals", fields: [assignedToId], references: [id])
+
+  followUps FollowUp[]
+
+  @@index([stage])
+  @@index([assignedToId])
+}
+
+model FollowUp {
+  id          String         @id @default(cuid())
+  title       String
+  type        FollowUpType   @default(CALL)
+  priority    Priority       @default(MEDIUM)
+  status      FollowUpStatus @default(PENDING)
+  scheduledAt DateTime
+  completedAt DateTime?
+  resultNote  String?
+  createdAt   DateTime       @default(now())
+  updatedAt   DateTime       @updatedAt
+
+  leadId String?
+  lead   Lead?   @relation(fields: [leadId], references: [id], onDelete: Cascade)
+
+  customerId String?
+  customer   Customer? @relation(fields: [customerId], references: [id], onDelete: Cascade)
+
+  dealId String?
+  deal   Deal?   @relation(fields: [dealId], references: [id], onDelete: Cascade)
+
+  assignedToId String?
+  assignedTo   User?   @relation("AssignedFollowUps", fields: [assignedToId], references: [id])
+
+  @@index([status])
+  @@index([scheduledAt])
+  @@index([assignedToId])
+}
+
+model Order {
+  id              String        @id @default(cuid())
+  orderNumber     String        @unique
+  totalAmount     Int
+  discountAmount  Int           @default(0)
+  taxAmount       Int           @default(0)
+  finalAmount     Int
+  paymentMethod   PaymentMethod @default(CASH)
+  paidAmount      Int           @default(0)
+  remainingAmount Int           @default(0)
+  status          OrderStatus   @default(CONFIRMED)
+  shippingAddress String?
+  shippingStatus  String        @default("PREPARING")
+  notes           String?
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
+
+  customerId String
+  customer   Customer @relation(fields: [customerId], references: [id])
+
+  sellerId String?
+  seller   User?   @relation("SellerOrders", fields: [sellerId], references: [id])
+
+  items        OrderItem[]
+  payments     Payment[]
+  installments Installment[]
+
+  @@index([orderNumber])
+  @@index([customerId])
+  @@index([status])
+  @@index([sellerId])
+  @@index([createdAt])
+}
+
+model OrderItem {
+  id         String         @id @default(cuid())
+  orderId    String
+  order      Order          @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  variantId  String
+  variant    ProductVariant @relation(fields: [variantId], references: [id])
+  quantity   Int            @default(1)
+  unitPrice  Int
+  totalPrice Int
+  notes      String?
+}
+
+model Payment {
+  id             String        @id @default(cuid())
+  idempotencyKey String?       @unique
+  orderId        String
+  order          Order         @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  amount         Int
+  method         PaymentMethod @default(POS)
+  trackingNumber String?
+  paidAt         DateTime      @default(now())
+  status         String        @default("CONFIRMED")
+  notes          String?
+  createdAt      DateTime      @default(now())
+
+  @@index([orderId])
+  @@index([paidAt])
+}
+
+model Installment {
+  id                String            @id @default(cuid())
+  orderId           String
+  order             Order             @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  installmentNumber Int
+  amount            Int
+  dueDate           DateTime
+  status            InstallmentStatus @default(PENDING)
+  paidDate          DateTime?
+  paymentTracking   String?
+  chequeNumber      String?
+  notes             String?
+  createdAt         DateTime          @default(now())
+  updatedAt         DateTime          @updatedAt
+
+  @@unique([orderId, installmentNumber])
+  @@index([orderId])
+  @@index([dueDate, status])
+}
+
+model Notification {
+  id        String           @id @default(cuid())
+  userId    String
+  user      User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  title     String
+  message   String
+  type      NotificationType @default(FOLLOWUP_REMINDER)
+  isRead    Boolean          @default(false)
+  linkUrl   String?
+  createdAt DateTime         @default(now())
+
+  @@index([userId, isRead])
+}
+
+model AutomationRule {
+  id          String   @id @default(cuid())
+  name        String
+  triggerType String // e.g. "HOT_LEAD", "STAGE_WON", "INSTALLMENT_DUE", "INACTIVE_48H"
+  conditions  String // legacy JSON string
+  actions     String // legacy JSON string
+  isActive    Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}
+
+model AuditLog {
+  id        String      @id @default(cuid())
+  userId    String?
+  user      User?       @relation(fields: [userId], references: [id])
+  action    AuditAction
+  entity    String
+  entityId  String?
+  details   String? // legacy JSON string
+  ipAddress String?
+  userAgent String?
+  createdAt DateTime    @default(now())
+
+  @@index([entity, entityId])
+  @@index([userId])
+  @@index([createdAt])
+}
+
+model AuthRateLimit {
+  key       String   @id
+  attempts  Int      @default(0)
+  resetAt   DateTime
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([resetAt])
+}

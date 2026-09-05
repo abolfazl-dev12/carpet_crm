@@ -34,3 +34,22 @@
 | `GET` / `POST` | `/api/excel/export` | Export leads/customers/products to Excel (.xlsx) | Manager, Admin |
 | `POST` | `/api/excel/import` | Bulk import leads from Excel with validation | Manager, Admin |
 | `GET` | `/api/audit-logs` | Query system security and audit trail | Admin |
+
+### قرارداد ایجاد سفارش
+
+هر قلم سفارش فقط شامل `variantId` و `quantity` است. قیمت واحد، جمع ردیف، جمع سفارش، تخفیف، مبلغ نهایی، مبلغ پرداخت‌شده و مانده هرگز از کلاینت پذیرفته نمی‌شوند.
+
+```json
+{
+  "customerId": "customer-id",
+  "items": [
+    { "variantId": "variant-id", "quantity": 2 }
+  ],
+  "paymentMethod": "INSTALLMENT",
+  "installmentCount": 4,
+  "shippingAddress": "نشانی تحویل",
+  "notes": "توضیحات اختیاری"
+}
+```
+
+سرور برای روش `INSTALLMENT` از `ProductVariant.installmentPrice` و برای سایر روش‌ها از `cashPrice` استفاده می‌کند. تا زمانی که موتور تخفیف معتبر یا پرداخت تأییدشده وجود نداشته باشد، سفارش با تخفیف و مبلغ پرداخت‌شدهٔ صفر ساخته می‌شود و مانده برابر مبلغ نهایی است. ارسال هر فیلد مالی اضافی با پاسخ `400` رد می‌شود.

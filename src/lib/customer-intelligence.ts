@@ -1,4 +1,5 @@
 import { formatToman, toPersianDigits, formatJalaliDate } from "./persian";
+import { readStringArray } from "./json-fields";
 
 export type CustomerSegment =
   | "HOT"
@@ -286,7 +287,7 @@ function calculateNextBestActionInternal(params: {
 
   // 4. Customer has Need Profile but no active deals
   if (needProfile && activeDeals.length === 0) {
-    const sizes = needProfile.preferredSizes ? JSON.parse(needProfile.preferredSizes) : [];
+    const sizes = readStringArray(needProfile.preferredSizes);
     return {
       action: "ارسال پیشنهاد طرح‌های منطبق با سلیقه مشتری از انبار",
       reason: `پروفایل سلیقه (${sizes.join("، ") || "طرح‌های محبوب"}) آماده دریافت پیشنهاد و شروع معامله است.`,

@@ -1,6 +1,15 @@
 import { NextRequest, NextResponse } from "next/server";
+import type { Prisma } from "@prisma/client";
 import prisma from "@/lib/prisma";
+import { PUBLIC_USER_SELECT } from "@/lib/public-user";
 import { getSessionFromRequest } from "@/lib/auth";
+import {
+  CRM_MUTATION_ROLES,
+  getCustomerScope,
+  getLeadScope,
+  getOrderScope,
+  hasAllowedRole,
+} from "@/lib/authorization";
 import * as XLSX from "xlsx";
 import { formatJalaliDate } from "@/lib/persian";
 import { SOURCE_LABELS, STAGE_CONFIG } from "@/types";
@@ -9,6 +18,9 @@ export async function GET(req: NextRequest) {
   try {
     const session = await getSessionFromRequest(req);
     if (!session) return NextResponse.json({ error: "عدم احراز هویت" }, { status: 401 });
+    if (!hasAllowedRole(session, CRM_MUTATION_ROLES)) {
+      return NextResponse.json({ error: "نقش فقط‌خواندنی مجاز به خروجی انبوه نیست." }, { status: 403 });
+    }
 
     const { searchParams } = new URL(req.url);
     const type = searchParams.get("type") || "leads"; // leads | customers | products
@@ -17,15 +29,11 @@ export async function GET(req: NextRequest) {
     const fileName = `carpet-crm-${type}.xlsx`;
 
     if (type === "leads") {
-      const whereClause: any = {};
-      // Server-side RBAC: Sales reps can only export their own leads
-      if (session.role === "SALES_REP") {
-        whereClause.assignedToId = session.userId;
-      }
+      const whereClause: Prisma.LeadWhereInput = getLeadScope(session);
 
       const leads = await prisma.lead.findMany({
         where: whereClause,
-        include: { assignedTo: true },
+        include: { assignedTo: { select: PUBLIC_USER_SELECT } },
         orderBy: { createdAt: "desc" },
       });
 
@@ -43,15 +51,14 @@ export async function GET(req: NextRequest) {
         "تاریخ ایجاد": formatJalaliDate(l.createdAt),
       }));
     } else if (type === "customers") {
-      const whereClause: any = {};
-      // Server-side RBAC: Sales reps can only export their own customers
-      if (session.role === "SALES_REP") {
-        whereClause.assignedToId = session.userId;
-      }
+      const whereClause: Prisma.CustomerWhereInput = getCustomerScope(session);
 
       const customers = await prisma.customer.findMany({
         where: whereClause,
-        include: { assignedTo: true, orders: true },
+        include: {
+          assignedTo: { select: PUBLIC_USER_SELECT },
+          orders: { where: getOrderScope(session) },
+        },
         orderBy: { createdAt: "desc" },
       });
 

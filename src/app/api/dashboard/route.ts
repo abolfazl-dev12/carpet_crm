@@ -1,6 +1,15 @@
 import { NextRequest, NextResponse } from "next/server";
 import prisma from "@/lib/prisma";
 import { getSessionFromRequest } from "@/lib/auth";
+import {
+  getCustomerScope,
+  getDealScope,
+  getFollowUpScope,
+  getLeadScope,
+  getOrderScope,
+  hasAllowedRole,
+  MANAGEMENT_ROLES,
+} from "@/lib/authorization";
 import { runAutomationRules } from "@/lib/automation";
 import { evaluateCustomerIntelligence } from "@/lib/customer-intelligence";
 
@@ -35,12 +44,17 @@ export async function GET(req: NextRequest) {
     const session = await getSessionFromRequest(req);
     if (!session) return NextResponse.json({ error: "عدم احراز هویت" }, { status: 401 });
 
-    // Run background automation rules check
-    await runAutomationRules();
+    // Read-only roles and individual reps must not trigger organization-wide writes.
+    if (hasAllowedRole(session, MANAGEMENT_ROLES)) {
+      await runAutomationRules();
+    }
 
     const isRep = session.role === "SALES_REP";
-    const userFilter = isRep ? { assignedToId: session.userId } : {};
-    const sellerFilter = isRep ? { sellerId: session.userId } : {};
+    const customerFilter = getCustomerScope(session);
+    const leadFilter = getLeadScope(session);
+    const dealFilter = getDealScope(session);
+    const followUpFilter = getFollowUpScope(session);
+    const orderFilter = getOrderScope(session);
 
     const now = new Date();
     const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate());
@@ -49,7 +63,7 @@ export async function GET(req: NextRequest) {
 
     // 1. Orders & Sales Metrics
     const allOrders = await prisma.order.findMany({
-      where: sellerFilter,
+      where: orderFilter,
       select: {
         id: true,
         finalAmount: true,
@@ -74,7 +88,7 @@ export async function GET(req: NextRequest) {
 
     // 2. Deals & Pipeline Metrics
     const allDeals = await prisma.deal.findMany({
-      where: userFilter,
+      where: dealFilter,
       include: {
         customer: { select: { id: true, firstName: true, lastName: true, phone: true, code: true } },
         lead: { select: { id: true, firstName: true, lastName: true, phone: true } },
@@ -95,16 +109,16 @@ export async function GET(req: NextRequest) {
     );
 
     // 3. Leads & Conversion Rate
-    const totalLeads = await prisma.lead.count({ where: userFilter });
+    const totalLeads = await prisma.lead.count({ where: leadFilter });
     const newLeads = await prisma.lead.count({
-      where: { ...userFilter, status: "NEW" },
+      where: { ...leadFilter, status: "NEW" },
     });
     const hotLeadsCount = await prisma.lead.count({
-      where: { ...userFilter, temperature: "HOT", status: { notIn: ["WON", "LOST"] } },
+      where: { ...leadFilter, temperature: "HOT", status: { notIn: ["WON", "LOST"] } },
     });
 
     const totalCustomers = await prisma.customer.count({
-      where: isRep ? { assignedToId: session.userId } : {},
+      where: customerFilter,
     });
 
     const conversionRate =
@@ -115,7 +129,7 @@ export async function GET(req: NextRequest) {
       where: {
         status: { in: ["PENDING", "OVERDUE"] },
         dueDate: { lt: now },
-        order: sellerFilter,
+        order: orderFilter,
       },
       include: {
         order: {
@@ -137,7 +151,7 @@ export async function GET(req: NextRequest) {
     // 5. Follow-ups
     const overdueFollowUps = await prisma.followUp.count({
       where: {
-        ...userFilter,
+        ...followUpFilter,
         status: { in: ["PENDING", "OVERDUE"] },
         scheduledAt: { lt: now },
       },
@@ -145,7 +159,7 @@ export async function GET(req: NextRequest) {
 
     const todayFollowUps = await prisma.followUp.findMany({
       where: {
-        ...userFilter,
+        ...followUpFilter,
         scheduledAt: { gte: startOfToday, lte: endOfToday },
       },
       include: {
@@ -198,11 +212,14 @@ export async function GET(req: NextRequest) {
 
     // 8. At-Risk Customers (Calculated from real Customer Intelligence)
     const rawCustomers = await prisma.customer.findMany({
-      where: isRep ? { assignedToId: session.userId } : {},
+      where: customerFilter,
       include: {
-        orders: { include: { installments: true } },
-        deals: true,
-        followUps: true,
+        orders: {
+          where: orderFilter,
+          include: { installments: true },
+        },
+        deals: { where: dealFilter },
+        followUps: { where: followUpFilter },
         needProfiles: true,
         assignedTo: { select: { name: true } },
       },
@@ -236,16 +253,32 @@ export async function GET(req: NextRequest) {
 
     // 9. Reps Leaderboard (For Manager / Admin)
     const salesReps = await prisma.user.findMany({
-      where: { role: { in: ["SALES_REP", "SALES_MANAGER", "ADMIN"] }, isActive: true },
+      where: {
+        role: { in: ["SALES_REP", "SALES_MANAGER", "ADMIN"] },
+        isActive: true,
+        ...(isRep ? { id: session.userId } : {}),
+      },
       select: {
         id: true,
         name: true,
         avatar: true,
         role: true,
-        orders: { select: { finalAmount: true, status: true } },
-        assignedLeads: { select: { id: true, status: true } },
-        assignedCustomers: { select: { id: true } },
-        followUps: { select: { status: true } },
+        orders: {
+          where: orderFilter,
+          select: { finalAmount: true, status: true },
+        },
+        assignedLeads: {
+          where: leadFilter,
+          select: { id: true, status: true },
+        },
+        assignedCustomers: {
+          where: customerFilter,
+          select: { id: true },
+        },
+        followUps: {
+          where: followUpFilter,
+          select: { status: true },
+        },
       },
     });
 
@@ -279,26 +312,29 @@ export async function GET(req: NextRequest) {
     // 10. Top Selling Carpets
     const topCarpets = await prisma.orderItem.groupBy({
       by: ["variantId"],
+      where: isRep ? { order: orderFilter } : undefined,
       _sum: { quantity: true, totalPrice: true },
       orderBy: { _sum: { quantity: "desc" } },
       take: 5,
     });
 
-    const topCarpetDetails = await Promise.all(
-      topCarpets.map(async (tc) => {
-        const variant = await prisma.productVariant.findUnique({
-          where: { id: tc.variantId },
-          include: { product: true },
-        });
-        return {
-          productName: variant?.product.name || "فرش سفارشی",
-          code: variant?.product.code || "-",
-          size: variant?.size || "-",
-          soldCount: tc._sum.quantity || 0,
-          totalRevenue: tc._sum.totalPrice || 0,
-        };
-      })
-    );
+    const variantIds = topCarpets.map((tc) => tc.variantId);
+    const variantsList = await prisma.productVariant.findMany({
+      where: { id: { in: variantIds } },
+      include: { product: true },
+    });
+    const variantMap = new Map(variantsList.map((v) => [v.id, v]));
+
+    const topCarpetDetails = topCarpets.map((tc) => {
+      const variant = variantMap.get(tc.variantId);
+      return {
+        productName: variant?.product.name || "فرش سفارشی",
+        code: variant?.product.code || "-",
+        size: variant?.size || "-",
+        soldCount: tc._sum.quantity || 0,
+        totalRevenue: tc._sum.totalPrice || 0,
+      };
+    });
 
     return NextResponse.json({
       kpis: {

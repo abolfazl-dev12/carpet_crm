@@ -148,15 +148,13 @@ export const leadUpdateSchema = z.object({
 // Order & Payment Schemas
 // ==========================================
 export const orderItemSchema = z.object({
-  variantId: z.string().min(1, "شناسه تنوع فرش الزامی است"),
-  quantity: z.number().int().positive("تعداد باید حداقل ۱ تخته باشد"),
-  unitPrice: z.number().nonnegative("قیمت واحد نمی‌تواند منفی باشد"),
-});
+  variantId: z.string().min(1, "شناسه تنوع فرش الزامی است").max(100),
+  quantity: z.number().int().positive("تعداد باید حداقل ۱ تخته باشد").max(2_147_483_647),
+}).strict();
 
 export const orderCreateSchema = z.object({
   customerId: z.string().min(1, "شناسه مشتری الزامی است"),
   items: z.array(orderItemSchema).min(1, "حداقل یک قلم فرش الزامی است"),
-  discountAmount: z.number().nonnegative().default(0),
   paymentMethod: z.enum([
     "CASH",
     "POS",
@@ -165,11 +163,42 @@ export const orderCreateSchema = z.object({
     "ONLINE",
     "INSTALLMENT",
   ]).default("CASH"),
-  initialPaidAmount: z.number().nonnegative().default(0),
   installmentCount: z.number().int().min(0).max(24).default(0),
   shippingAddress: z.string().max(300).optional().nullable(),
   notes: z.string().max(1000).optional().nullable(),
+}).strict().superRefine((order, ctx) => {
+  const isInstallment = order.paymentMethod === "INSTALLMENT";
+
+  if (isInstallment && order.installmentCount < 1) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["installmentCount"],
+      message: "تعداد اقساط برای خرید اقساطی باید حداقل ۱ باشد",
+    });
+  }
+
+  if (!isInstallment && order.installmentCount !== 0) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["installmentCount"],
+      message: "تعداد اقساط فقط برای روش پرداخت اقساطی مجاز است",
+    });
+  }
+
+  const variantIds = new Set<string>();
+  order.items.forEach((item, index) => {
+    if (variantIds.has(item.variantId)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["items", index, "variantId"],
+        message: "هر تنوع کالا فقط یک‌بار می‌تواند در سفارش ثبت شود",
+      });
+    }
+    variantIds.add(item.variantId);
+  });
 });
+
+export type OrderCreateInput = z.infer<typeof orderCreateSchema>;
 
 export const installmentUpdateSchema = z.object({
   id: z.string().min(1, "شناسه قسط الزامی است"),
@@ -342,7 +371,10 @@ export const userCreateSchema = z.object({
   name: z.string().min(1, "نام و نام خانوادگی الزامی است").max(100),
   email: z.string().email("ایمیل نامعتبر است").max(100),
   phone: z.string().min(10, "شماره همراه نامعتبر است").max(20),
-  password: z.string().min(6, "رمز عبور باید حداقل ۶ کاراکتر باشد").max(128),
+  password: z.string()
+    .min(12, "رمز عبور باید حداقل ۱۲ نویسه باشد")
+    .max(128)
+    .refine((value) => value.trim().length >= 12, "رمز عبور نمی‌تواند از فاصله‌های خالی تشکیل شود"),
   role: z.enum(["ADMIN", "SALES_MANAGER", "SALES_REP", "VIEWER"]).default("SALES_REP"),
 });
 
@@ -352,6 +384,11 @@ export const userUpdateSchema = z.object({
   email: z.string().email().max(100),
   phone: z.string().min(10).max(20),
   role: z.enum(["ADMIN", "SALES_MANAGER", "SALES_REP", "VIEWER"]).optional(),
-  password: z.string().min(6).max(128).optional().or(z.literal("")),
+  password: z.string()
+    .min(12, "رمز عبور باید حداقل ۱۲ نویسه باشد")
+    .max(128)
+    .refine((value) => value.trim().length >= 12, "رمز عبور نمی‌تواند از فاصله‌های خالی تشکیل شود")
+    .optional()
+    .or(z.literal("")),
   isActive: z.boolean().optional(),
 });

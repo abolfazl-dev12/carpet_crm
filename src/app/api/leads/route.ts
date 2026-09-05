@@ -1,6 +1,19 @@
 import { NextRequest, NextResponse } from "next/server";
+import {
+  LeadSource,
+  LeadStatus,
+  LeadTemperature,
+  type Prisma,
+} from "@prisma/client";
 import prisma from "@/lib/prisma";
+import { PUBLIC_USER_SELECT } from "@/lib/public-user";
 import { getSessionFromRequest } from "@/lib/auth";
+import {
+  canMutateCrm,
+  getFollowUpScope,
+  getLeadScope,
+  isEnumValue,
+} from "@/lib/authorization";
 import { normalizeIranianPhone, isValidIranianMobile } from "@/lib/persian";
 import { calculateTemperature } from "@/lib/scoring";
 import { logAuditEvent } from "@/lib/audit";
@@ -20,18 +33,31 @@ export async function GET(req: NextRequest) {
     const temperature = searchParams.get("temperature")?.trim() || "";
     const repId = searchParams.get("repId")?.trim() || "";
 
-    const whereClause: any = {};
+    const whereClause: Prisma.LeadWhereInput = getLeadScope(session);
 
     // Role-based visibility enforcement
-    if (session.role === "SALES_REP") {
-      whereClause.assignedToId = session.userId;
-    } else if (repId) {
+    if (session.role !== "SALES_REP" && repId) {
       whereClause.assignedToId = repId;
     }
 
-    if (status) whereClause.status = status;
-    if (source) whereClause.source = source;
-    if (temperature) whereClause.temperature = temperature;
+    if (status) {
+      if (!isEnumValue(Object.values(LeadStatus), status)) {
+        return NextResponse.json({ error: "وضعیت سرنخ نامعتبر است." }, { status: 400 });
+      }
+      whereClause.status = status;
+    }
+    if (source) {
+      if (!isEnumValue(Object.values(LeadSource), source)) {
+        return NextResponse.json({ error: "منبع سرنخ نامعتبر است." }, { status: 400 });
+      }
+      whereClause.source = source;
+    }
+    if (temperature) {
+      if (!isEnumValue(Object.values(LeadTemperature), temperature)) {
+        return NextResponse.json({ error: "دمای سرنخ نامعتبر است." }, { status: 400 });
+      }
+      whereClause.temperature = temperature;
+    }
 
     if (search) {
       whereClause.OR = [
@@ -49,6 +75,7 @@ export async function GET(req: NextRequest) {
         assignedTo: { select: { id: true, name: true, avatar: true } },
         needProfile: true,
         followUps: {
+          where: getFollowUpScope(session),
           orderBy: { scheduledAt: "desc" },
           take: 1,
         },
@@ -68,6 +95,9 @@ export async function POST(req: NextRequest) {
     const session = await getSessionFromRequest(req);
     if (!session) {
       return NextResponse.json({ error: "عدم احراز هویت" }, { status: 401 });
+    }
+    if (!canMutateCrm(session)) {
+      return NextResponse.json({ error: "نقش فقط‌خواندنی مجاز به ثبت سرنخ نیست." }, { status: 403 });
     }
 
     const rawBody = await req.json().catch(() => null);
@@ -141,10 +171,10 @@ export async function POST(req: NextRequest) {
           assignedToId: targetRepId,
           needProfile: {
             create: {
-              preferredSizes: JSON.stringify(preferredSizes || ["3x4"]),
+              preferredSizes: preferredSizes || ["3x4"],
               preferredShane: preferredShane || null,
               preferredDensity: preferredDensity || null,
-              preferredColors: JSON.stringify(preferredColors || ["سرمه‌ای"]),
+              preferredColors: preferredColors || ["سرمه‌ای"],
               preferredStyle: preferredStyle || null,
               preferredCollection: preferredCollection || null,
               budgetMin: cleanBudget ? Math.round(cleanBudget * 0.7) : null,
@@ -157,7 +187,7 @@ export async function POST(req: NextRequest) {
         },
         include: {
           needProfile: true,
-          assignedTo: true,
+          assignedTo: { select: PUBLIC_USER_SELECT },
         },
       });
 
